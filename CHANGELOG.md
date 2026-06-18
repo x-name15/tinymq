@@ -1,4 +1,4 @@
-# 1.0.0 — 2026-06-18 — Official initial release of TinyMQ
+## [1.0.0] - 2026-06-18 — Official initial release of TinyMQ
 
 This is the first official release of TinyMQ. It evolves the initial prototype into a robust, lightweight, and production-ready message broker.
 
