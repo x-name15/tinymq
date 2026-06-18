@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🍃 TinyMQ Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f7f6; color: #333; margin: 0; padding: 40px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 30px; border-bottom: 2px solid #e2e8f0; padding-bottom: 20px; }
+        h1 { margin: 0; color: #2d3748; font-size: 28px; }
+        .badge { background: #48bb78; color: white; padding: 4px 12px; border-radius: 20px; font-size: 14px; font-weight: bold; }
+        .metrics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 30px; }
+        .metric-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-left: 4px solid #48bb78; }
+        .metric-card.blue { border-left-color: #3182ce; }
+        .metric-card.purple { border-left-color: #805ad5; }
+        .metric-label { font-size: 12px; text-transform: uppercase; color: #718096; font-weight: bold; margin-bottom: 5px; }
+        .metric-value { font-size: 24px; font-weight: bold; color: #2d3748; font-family: monospace; }
+        .card { background: white; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); padding: 24px; }
+        table { width: 100%; border-collapse: collapse; text-align: left; }
+        th { color: #718096; font-size: 14px; text-transform: uppercase; padding-bottom: 12px; border-bottom: 2px solid #edf2f7; }
+        td { padding: 16px 0; border-bottom: 1px solid #edf2f7; font-size: 16px; }
+        .topic-name { font-weight: 600; color: #1a202c; font-family: monospace; }
+        .msg-count { background: #edf2f7; color: #4a5568; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-family: monospace; }
+        .empty { text-align: center; color: #a0aec0; padding: 40px 0; font-style: italic; }
+        .refresh-btn { background: #3182ce; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 500; text-decoration: none; font-size: 14px; }
+        .refresh-btn:hover { background: #2b6cb0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🍃 TinyMQ Dashboard</h1>
+            <div>
+                <span class="badge">● Online</span>
+				<span class="badge" style="background: #3182ce; margin-left: 5px;">v{{.Version}}</span>
+                <a href="/dashboard" class="refresh-btn" style="margin-left: 10px;">🔄 Reload</a>
+            </div>
+        </div>
+        <div class="metrics-grid">
+            <div class="metric-card blue">
+                <div class="metric-label">Active Topics</div>
+                <div class="metric-value">{{.TotalTopics}}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Total Messages in RAM</div>
+                <div class="metric-value">{{.TotalMessages}}</div>
+            </div>
+            <div class="metric-card purple">
+                <div class="metric-label">Broker Memory</div>
+                <div class="metric-value">{{.MemoryAllocated}}</div>
+            </div>
+        </div>
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Active Topic</th>
+                        <th style="text-align: right;">Messages in RAM</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Topics}}
+                    <tr>
+                        <td><span class="topic-name">{{.Name}}</span></td>
+                        <td style="text-align: right;"><span class="msg-count">{{.MessageCount}}</span></td>
+                    </tr>
+                    {{else}}
+                    <tr>
+                        <td colspan="2" class="empty">No topics in memory at this moment.</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>

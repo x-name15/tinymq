@@ -7,7 +7,6 @@
 [![Docker Image Size](https://img.shields.io/badge/Image_Size-~20MB-2496ED?style=flat-square&logo=docker)](https://github.com/x-name15/tinymq/pkgs/container/tinymq)
 [![Docker](https://img.shields.io/badge/Docker-Engine%20%2F%20Desktop-2496ED?style=flat-square&logo=docker)](https://www.docker.com/)
 
-
 A tiny, ultra-lightweight message broker for side projects, prototypes, and internal tools. 
 Built from scratch in Go with zero external heavy dependencies.
 
@@ -22,13 +21,41 @@ TinyMQ offers a true "plug & play" alternative to heavy brokers like RabbitMQ or
 - **Wildcard Routing:** Support for topic wildcards (e.g., `orders.*`) with regex compilation caching.
 - **Resilient Go SDK:** Official client includes exponential backoff and automatic message re-queuing.
 
+## Why use TinyMQ? 
+
+Let's be honest: Kafka and RabbitMQ are incredible engineering marvels, but they are often **massive overkill** for small to medium projects. 
+Setting up an Erlang runtime, managing JVMs, or configuring Zookeeper/Kraft clusters just to pass a few JSON messages between three microservices is exhausting.
+
+TinyMQ solves the "over-engineering" problem. It is built for developers who need reliable asynchronous communication without the operational tax. 
+
+**You should use TinyMQ if:**
+-**You are building a side project or MVP** and want to move fast.
+- **You have limited server resources** (it runs smoothly on a $4/month VPS).
+- **You want true Plug & Play:** No XML/YAML config files, no heavy runtimes. Just run the binary or the ~20MB Docker image.
+
+**You should NOT use TinyMQ if:**
+- You need to process millions of messages per second.
+- You need highly available, multi-node clustering and distributed consensus.
+
 ## Image of the Dashboard
 ![Texto alternativo](images/tinymq-dash.png)
 - All in HTML btw
 
 ## Quick Start (Docker)
 
-Run the broker using Docker Compose:
+### Using the pre-built Docker image (GHCR)
+
+```bash
+docker pull ghcr.io/x-name15/tinymq:latest
+
+docker run -d \
+  --name tinymq \
+  -p 7800:7800 \
+  -v $(pwd)/data:/root/data \
+  ghcr.io/x-name15/tinymq:latest
+```
+
+### Run the broker using our Docker Compose:
 
 ```bash
 git clone https://github.com/x-name15/tinymq.git
@@ -41,5 +68,18 @@ The broker will start on port `7800`. Data persists locally in the `./data` dire
 ## Documentation
 
 See the full documentation in the [`docs` folder](./docs/DOCUMENTATION.md) for API reference, SDK usage, and architecture details.
+
+## LICENSE
+TinyMQ is licensed under the GPL v3. See [`LICENSE`](./LICENSE) for details.
+
+## Contributions
+
+If you find bugs or want to improve TinyMQ then:
+1. Fork the repo
+2. Create a branch with your feature
+3. Open a PR
+
+### Credits
+**Author:** Mr Jacket 
 
 <!-- EOF -->

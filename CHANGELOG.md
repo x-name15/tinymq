@@ -3,6 +3,17 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [1.0.5] - 2026-06-18 — Embedded dashboard, Makefile and Readme Enhancements
+
+## Added
+
+- **Asset Embedding:** Moved `dashboard.html` to an external file and utilized `//go:embed` to include it within the binary, maintaining a single-file delivery while improving maintainability.
+- **Improved README:** Added "Why use TinyMQ?" rationale and comprehensive "Configuration & depl
+
+## Changed
+- **Workflow:** Optimized `Makefile` to focus on essential tasks (fmt, build, clean).
+
+---
 ## [1.0.1] - 2026-06-18 — TinyMQ is NOW completely zero-dependency
 
 ## Removed

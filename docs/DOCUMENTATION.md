@@ -174,7 +174,7 @@ docker run -d \
   --name tinymq \
   -p 7800:7800 \
   -v $(pwd)/data:/root/data \
-  ghcr.io/yourusername/tinymq:latest
+  ghcr.io/x-name15/tinymq:latest
 ```
 
 ### Environment variables
