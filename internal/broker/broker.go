@@ -83,7 +83,7 @@ func (b *Broker) Publish(topicName string, payload []byte) {
 	b.mu.Unlock()
 
 	msg := message.Message{
-		ID:        uuid.NewUUID(),
+		ID:        helper.NewUUID(),
 		Topic:     topicName,
 		Payload:   payload,
 		Timestamp: time.Now(),
