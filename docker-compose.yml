@@ -1,0 +1,11 @@
+services:
+  tinymq:
+    build: .
+    image: tinymq:latest
+    environment:
+      - PORT=7800 
+    ports:
+      - "7800:7800" 
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

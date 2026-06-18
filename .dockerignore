@@ -1,0 +1,15 @@
+# Ignore documentation, README, images, LICENSE, CHANGELOG and examples
+docs/
+README.md
+images/
+examples/
+LICENSE
+CHANGELOG.md
+
+# Ignore the local data folder to avoid overwriting it
+data/
+
+# Ignore version control and local binaries
+.git/
+.gitignore
+bin/
