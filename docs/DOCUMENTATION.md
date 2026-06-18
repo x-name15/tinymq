@@ -168,7 +168,7 @@ TinyMQ requires no configuration files by default; it uses environment variables
 ### Using the pre-built Docker image (GHCR)
 
 ```bash
-docker pull ghcr.io/yourusername/tinymq:latest
+docker pull ghcr.io/x-name15/tinymq:latest
 
 docker run -d \
   --name tinymq \
@@ -189,7 +189,7 @@ TinyMQ writes WAL `.log` files into `./data`. In Docker Compose, mount this path
 # docker-compose.yml example
 services:
   tinymq:
-    image: ghcr.io/x-name/tinymq:latest
+    image: ghcr.io/x-name15/tinymq:latest
     environment:
       - PORT=7800
     ports:
