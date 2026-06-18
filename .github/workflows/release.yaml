@@ -28,7 +28,6 @@ jobs:
         run: |
           VERSION=$(grep -m1 '## \[' CHANGELOG.md | sed 's/## \[\([^]]*\)\].*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Detected Version: $VERSION"
 
       - name: Extract notes from CHANGELOG
         id: notes
@@ -45,94 +44,52 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           TITLE=$(grep -m1 "## \[${VERSION}\]" CHANGELOG.md | sed 's/## \[[^]]*\] - [0-9-]* — //')
           echo "title=$TITLE" >> $GITHUB_OUTPUT
-          echo "Detected Title: $TITLE"
 
-      - name: Update version in version.go
+      - name: Update files and Commit
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           sed -i "s/const Version = \"[^\"]*\"/const Version = \"${VERSION}\"/" cmd/tinymq/version.go
-
-      - name: Update the README file
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          sed -i "s|Release-v[0-9]*\.[0-9]*\.[0-9]*-green|Release-v${VERSION}-green|g" README.md
-          sed -i "s|v[0-9]*\.[0-9]*\.[0-9]* - CHANGE LOG|v${VERSION} - CHANGE LOG|g" README.md
-          sed -i "s|v[0-9]*\.[0-9]*\.[0-9]* - Release notes|v${VERSION} - Release notes|g" README.md
-          sed -i "s|releases/tag/[0-9]*\.[0-9]*\.[0-9]*|releases/tag/${VERSION}|g" README.md
-
-      - name: Commit updated files
-        run: |
+          sed -i "s|Release-v[0-9.]*-green|Release-v${VERSION}-green|g" README.md
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md cmd/tinymq/version.go
-          git diff --staged --quiet || git commit -m "chore: actualizar versión a v${{ steps.version.outputs.version }}"
+          git diff --staged --quiet || git commit -m "chore: actualizar versión a v${VERSION}"
           git push
+          git tag "v${VERSION}" || true
+          git push origin "v${VERSION}" || true
 
-      - name: Create tag
+      - name: Build Binaries
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          git tag "v${VERSION}" || echo "Tag already exists, continuing..."
-          git push origin "v${VERSION}" || echo "Tag already on remote, continuing..."
+          mkdir dist
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-windows-amd64.exe ./cmd/tinymq
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-linux-amd64 ./cmd/tinymq
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-darwin-amd64 ./cmd/tinymq
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/tinymq-darwin-arm64 ./cmd/tinymq
 
-      - name: Build Windows
-        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-windows-amd64.exe ./cmd/tinymq
-
-      - name: Build Linux
-        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-linux-amd64 ./cmd/tinymq
-
-      - name: Build macOS Intel
-        run: GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-darwin-amd64 ./cmd/tinymq
-
-      - name: Build macOS Apple Silicon
-        run: GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/tinymq-darwin-arm64 ./cmd/tinymq
-
-      - name: Create ZIP file with source code
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          zip -r "dist/tinymq-source-${VERSION}.zip" . \
-            --exclude ".git/*" \
-            --exclude ".github/*" \
-            --exclude "dist/*" \
-            --exclude "*.exe" \
-            --exclude "data/*" 
-
-      - name: Create a GitHub Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: "v${{ steps.version.outputs.version }}: ${{ steps.title.outputs.title }}"
-          body: |
-            ${{ steps.notes.outputs.notes }}
-            ---
-            ## Downloads
-            | Operating System | File Name|
-            |-------------------|---------|
-            | Windows (x64) | `tinymq-windows-amd64.exe` |
-            | Linux (x64) | `tinymq-linux-amd64` |
-            | macOS (Intel) | `tinymq-darwin-amd64` |
-            | macOS (Apple Silicon) | `tinymq-darwin-arm64` |
-            
-            **Docker Image:** `docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}`
-            
-            View [CHANGELOG completo](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
-          files: |
-            dist/tinymq-windows-amd64.exe
-            dist/tinymq-linux-amd64
-            dist/tinymq-darwin-amd64
-            dist/tinymq-darwin-arm64
-            dist/tinymq-source-${{ steps.version.outputs.version }}.zip
-          fail_on_unmatched_files: true
+          body: "${{ steps.notes.outputs.notes }}"
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Registries
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build and push Docker images
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -140,3 +97,5 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+            flez71/tinymq:latest
+            flez71/tinymq:${{ steps.version.outputs.version }}
