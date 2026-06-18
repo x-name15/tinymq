@@ -9,7 +9,7 @@ import (
 	
 	"tinymq/internal/message"
 	"tinymq/internal/storage"
-	"tinymq/internal/helper/uuid"
+	"tinymq/internal/helper"
 )
 
 type Topic struct {
