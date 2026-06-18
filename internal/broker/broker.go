@@ -9,7 +9,7 @@ import (
 	
 	"tinymq/internal/message"
 	"tinymq/internal/storage"
-	"github.com/google/uuid"
+	"tinymq/internal/helper/uuid"
 )
 
 type Topic struct {
@@ -83,7 +83,7 @@ func (b *Broker) Publish(topicName string, payload []byte) {
 	b.mu.Unlock()
 
 	msg := message.Message{
-		ID:        uuid.New().String(),
+		ID:        uuid.NewUUID(),
 		Topic:     topicName,
 		Payload:   payload,
 		Timestamp: time.Now(),

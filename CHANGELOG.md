@@ -1,3 +1,22 @@
+# Changelog
+
+All notable changes of the proyect will be documented on this file.
+
+---
+## [1.0.1] - 2026-06-18 — TinyMQ is NOW completely zero-dependency
+
+## Removed
+
+- **External UUID package:** Completely removed the `github.com/google/uuid` dependency from the broker to strictly fulfill the project's promise of zero external dependencies.
+- **`go.sum` file:** Removed from the repository, as third-party module integrity checks are no longer needed.
+- **`go mod download` step:** Removed from the build phase in the `Dockerfile`, which also speeds up the image build process.
+
+## Changed
+
+- **Native UUID generator:** Implemented an internal Go helper using exclusively the standard library (`crypto/rand`) to securely generate unique message identifiers.
+- **`go.mod` cleanup:** Cleared the file by removing all external requirement blocks, leaving the project in a pure standard-library state.
+
+---
 ## [1.0.0] - 2026-06-18 — Official initial release of TinyMQ
 
 # TinyMQ - Official Release Notes
