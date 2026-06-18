@@ -22,6 +22,10 @@ TinyMQ offers a true "plug & play" alternative to heavy brokers like RabbitMQ or
 - **Wildcard Routing:** Support for topic wildcards (e.g., `orders.*`) with regex compilation caching.
 - **Resilient Go SDK:** Official client includes exponential backoff and automatic message re-queuing.
 
+## Image of the Dashboard
+![Texto alternativo](images/tinymq-dash.png)
+- All in HTML btw
+
 ## Quick Start (Docker)
 
 Run the broker using Docker Compose:
