@@ -46,19 +46,32 @@ TinyMQ solves the "over-engineering" problem. It is built for developers who nee
 
 ## Quick Start (Docker)
 
-### Using the pre-built Docker image (GHCR)
+### Using the pre-built Docker images
+You can pull the official image from two different registries
 
+#### From GHCR
 ```bash
+# From GitHub Container Registry
 docker pull ghcr.io/x-name15/tinymq:latest
 
 docker run -d \
   --name tinymq \
   -p 7800:7800 \
   -v $(pwd)/data:/root/data \
-  ghcr.io/x-name15/tinymq:latest
+ghcr.io/x-name15/tinymq:latest
 ```
 
-### Run the broker using our Docker Compose:
+### Or from Docker Hub
+```bash
+docker pull flez71/tinymq:latest
+
+docker run -d \
+  --name tinymq \
+  -p 7800:7800 \
+  -v $(pwd)/data:/root/data \
+  flez71/tinymq:latest
+```
+### And if you want, you can run the broker using our Docker Compose:
 
 ```bash
 git clone https://github.com/x-name15/tinymq.git
