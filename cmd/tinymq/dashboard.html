@@ -5,52 +5,90 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>🍃 TinyMQ Dashboard</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f7f6; color: #333; margin: 0; padding: 40px; }
-        .container { max-width: 1000px; margin: 0 auto; }
-        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 30px; border-bottom: 2px solid #e2e8f0; padding-bottom: 20px; }
-        h1 { margin: 0; color: #2d3748; font-size: 28px; }
+        :root {
+            --bg-color: #f4f7f6;
+            --text-color: #333;
+            --card-bg: white;
+            --border-color: #e2e8f0;
+            --border-light: #edf2f7;
+            --heading-color: #2d3748;
+            --muted-color: #718096;
+            --dlq-bg: #fff5f5;
+            --dlq-border: #fed7d7;
+            --msg-count-bg: #edf2f7;
+            --input-border: #cbd5e0;
+            --modal-bg: rgba(0,0,0,0.5);
+            --console-bg: #1a202c;
+            --console-text: #a3e635;
+        }
+
+        [data-theme="dark"] {
+            --bg-color: #1a202c;
+            --text-color: #e2e8f0;
+            --card-bg: #2d3748;
+            --border-color: #4a5568;
+            --border-light: #4a5568;
+            --heading-color: #f7fafc;
+            --muted-color: #a0aec0;
+            --dlq-bg: #4a154b;
+            --dlq-border: #702459;
+            --msg-count-bg: #4a5568;
+            --input-border: #4a5568;
+            --modal-bg: rgba(0,0,0,0.8);
+            --console-bg: #000000;
+            --console-text: #68d391;
+        }
+
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-color); color: var(--text-color); margin: 0; padding: 40px; transition: background 0.3s; }
+        .container { max-width: 1100px; margin: 0 auto; }
+        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 30px; border-bottom: 2px solid var(--border-color); padding-bottom: 20px; }
+        h1 { margin: 0; color: var(--heading-color); font-size: 28px; }
         
         .badge { background: #48bb78; color: white; padding: 4px 12px; border-radius: 20px; font-size: 14px; font-weight: bold; }
         .badge.dlq { background: #e53e3e; font-size: 11px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
-        .badge.webhook { background: #ed8936; font-size: 11px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
+        .badge.webhook { background: #ed8936; font-size: 11px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; cursor: pointer; transition: 0.2s; }
+        .badge.webhook:hover { background: #dd6b20; transform: scale(1.05); }
+        
         .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .metric-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-left: 4px solid #48bb78; }
+        .metric-card { background: var(--card-bg); padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-left: 4px solid #48bb78; }
         .metric-card.blue { border-left-color: #3182ce; }
         .metric-card.purple { border-left-color: #805ad5; }
         .metric-card.orange { border-left-color: #ed8936; }
         .metric-card.gray { border-left-color: #a0aec0; }
-        .metric-label { font-size: 12px; text-transform: uppercase; color: #718096; font-weight: bold; margin-bottom: 5px; }
-        .metric-value { font-size: 24px; font-weight: bold; color: #2d3748; font-family: monospace; }
+        .metric-label { font-size: 12px; text-transform: uppercase; color: var(--muted-color); font-weight: bold; margin-bottom: 5px; }
+        .metric-value { font-size: 24px; font-weight: bold; color: var(--heading-color); font-family: monospace; }
         
-        .card { background: white; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); padding: 24px; }
+        .card { background: var(--card-bg); border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); padding: 24px; }
+        .table-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .search-input { padding: 8px 12px; border-radius: 6px; border: 1px solid var(--input-border); background: var(--bg-color); color: var(--text-color); width: 250px; font-size: 14px; }
+        
         table { width: 100%; border-collapse: collapse; text-align: left; }
-        th { color: #718096; font-size: 14px; text-transform: uppercase; padding-bottom: 12px; border-bottom: 2px solid #edf2f7; }
-        td { padding: 16px 0; border-bottom: 1px solid #edf2f7; font-size: 15px; }
+        th { color: var(--muted-color); font-size: 14px; text-transform: uppercase; padding-bottom: 12px; border-bottom: 2px solid var(--border-light); }
+        td { padding: 16px 0; border-bottom: 1px solid var(--border-light); font-size: 15px; }
         
-        tr.is-dlq { background-color: #fff5f5; }
-        tr.is-dlq td { border-bottom: 1px solid #fed7d7; }
+        tr.is-dlq { background-color: var(--dlq-bg); }
+        tr.is-dlq td { border-bottom: 1px solid var(--dlq-border); }
         
-        .topic-name { font-weight: 600; color: #1a202c; font-family: monospace; }
+        .topic-name { font-weight: 600; color: var(--heading-color); font-family: monospace; }
         .action-btn { background: #48bb78; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 14px; display: flex; align-items: center; gap: 5px;}
         .action-btn:hover { background: #38a169; }
-        .msg-count { background: #edf2f7; color: #4a5568; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-family: monospace; }
+        .msg-count { background: var(--msg-count-bg); color: var(--text-color); padding: 4px 10px; border-radius: 6px; font-weight: bold; font-family: monospace; }
         tr.is-dlq .msg-count { background: #fed7d7; color: #9b2c2c; }
         .consumer-count { color: #3182ce; font-weight: bold; font-family: monospace; }
-        .empty { text-align: center; color: #a0aec0; padding: 40px 0; font-style: italic; }
+        
         .controls { display: flex; align-items: center; gap: 15px; }
         .refresh-btn { background: #3182ce; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 500; text-decoration: none; font-size: 14px; }
         .refresh-btn:hover { background: #2b6cb0; }
         
-        .toggle-container { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: #4a5568; }
-        .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+        .toggle-container { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--muted-color); cursor: pointer; }
+        .switch { position: relative; display: inline-block; width: 36px; height: 20px; }
         .switch input { opacity: 0; width: 0; height: 0; }
         .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #cbd5e0; transition: .4s; border-radius: 20px; }
         .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
         input:checked + .slider { background-color: #48bb78; }
-        input:checked + .slider:before { transform: translateX(20px); }
+        input:checked + .slider:before { transform: translateX(16px); }
 
-        /* Botones de acción en tabla */
-        .row-actions { display: flex; gap: 8px; justify-content: flex-end; }
+        .row-actions { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
         .btn-sm { padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; cursor: pointer; border: 1px solid transparent; }
         .btn-pub { background: #ebf8ff; color: #3182ce; border-color: #90cdf4; }
         .btn-pub:hover { background: #bee3f8; }
@@ -58,23 +96,37 @@
         .btn-sub:hover { background: #c6f6d5; }
         .btn-peek { background: #edf2f7; color: #4a5568; border-color: #cbd5e0; }
         .btn-peek:hover { background: #e2e8f0; }
-        .peek-msg-card { background: #1a202c; color: #a3e635; padding: 12px; border-radius: 6px; margin-bottom: 10px; font-family: monospace; font-size: 13px; overflow-x: auto; white-space: pre-wrap; }
+        .btn-danger { background: #fff5f5; color: #e53e3e; border-color: #feb2b2; }
+        .btn-danger:hover { background: #fed7d7; }
+        
+        .peek-msg-card { background: var(--console-bg); color: var(--console-text); padding: 12px; border-radius: 6px; margin-bottom: 10px; font-family: monospace; font-size: 13px; overflow-x: auto; white-space: pre-wrap; position: relative; }
+        .copy-btn { position: absolute; top: 8px; right: 8px; background: rgba(255,255,255,0.2); border: none; color: white; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .copy-btn:hover { background: rgba(255,255,255,0.4); }
 
-        /* Modal Styles */
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 1000; }
-        .modal { background: white; padding: 24px; border-radius: 8px; width: 100%; max-width: 500px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
-        .modal h2 { margin-top: 0; font-size: 20px; color: #2d3748; }
-        .modal-close { float: right; background: none; border: none; font-size: 20px; cursor: pointer; color: #a0aec0; }
-        .modal-close:hover { color: #4a5568; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--modal-bg); align-items: center; justify-content: center; z-index: 1000; }
+        .modal { background: var(--card-bg); padding: 24px; border-radius: 8px; width: 100%; max-width: 550px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
+        .modal h2 { margin-top: 0; font-size: 20px; color: var(--heading-color); }
+        .modal-close { float: right; background: none; border: none; font-size: 20px; cursor: pointer; color: var(--muted-color); }
         .form-group { margin-bottom: 15px; }
-        .form-group label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 14px; color: #4a5568;}
-        .form-group textarea { width: 100%; height: 120px; padding: 10px; border: 1px solid #cbd5e0; border-radius: 4px; font-family: monospace; box-sizing: border-box; resize: vertical;}
-        .modal-btn { width: 100%; padding: 10px; background: #3182ce; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 13px; color: var(--muted-color);}
+        .form-group input[type="text"], .form-group textarea { width: 100%; padding: 10px; border: 1px solid var(--input-border); border-radius: 4px; font-family: monospace; box-sizing: border-box; background: var(--bg-color); color: var(--text-color);}
+        .form-group textarea { height: 120px; resize: vertical; }
+        .flex-row { display: flex; gap: 15px; align-items: flex-end; }
+        .modal-btn { width: 100%; padding: 10px; background: #3182ce; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 10px; }
         .modal-btn:hover { background: #2b6cb0; }
-        .console-output { background: #1a202c; color: #a3e635; padding: 15px; border-radius: 6px; overflow-x: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; max-height: 250px; overflow-y: auto;}
+        .console-output { background: var(--console-bg); color: var(--console-text); padding: 15px; border-radius: 6px; overflow-x: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; max-height: 250px; overflow-y: auto; position: relative;}
+
+        #toast { visibility: hidden; min-width: 250px; background-color: #333; color: #fff; text-align: center; border-radius: 6px; padding: 12px; position: fixed; z-index: 2000; right: 30px; bottom: 30px; font-size: 14px; font-weight: bold; box-shadow: 0px 4px 10px rgba(0,0,0,0.3); }
+        #toast.show { visibility: visible; animation: fadein 0.5s, fadeout 0.5s 2.5s; }
+        @keyframes fadein { from {bottom: 0; opacity: 0;} to {bottom: 30px; opacity: 1;} }
+        @keyframes fadeout { from {bottom: 30px; opacity: 1;} to {bottom: 0; opacity: 0;} }
+
+        .wh-item { background: var(--bg-color); padding: 8px 12px; border-radius: 4px; margin-bottom: 8px; font-family: monospace; font-size: 12px; border: 1px solid var(--border-light); word-break: break-all; }
     </style>
 </head>
 <body>
+    <div id="toast">Message here</div>
+
     <div class="container">
         <div class="header">
             <h1>🍃 TinyMQ Dashboard</h1>
@@ -82,7 +134,15 @@
                 <span class="badge">● Online</span>
                 <span class="badge" style="background: #3182ce;">v{{.Version}}</span>
                 
-                <div class="toggle-container" style="margin-left: 15px; padding-left: 15px; border-left: 1px solid #e2e8f0;">
+                <div class="toggle-container" style="margin-left: 15px; padding-left: 15px; border-left: 1px solid var(--border-color);">
+                    <label class="switch">
+                        <input type="checkbox" id="themeToggle">
+                        <span class="slider"></span>
+                    </label>
+                    Dark Mode
+                </div>
+
+                <div class="toggle-container" style="margin-left: 10px;">
                     <label class="switch">
                         <input type="checkbox" id="autoRefreshToggle">
                         <span class="slider"></span>
@@ -120,42 +180,53 @@
         </div>
 
         <div class="card">
-            <table>
+            <div class="table-controls">
+                <h3 style="margin: 0; color: var(--heading-color);">Queues Overview</h3>
+                <input type="text" id="searchInput" class="search-input" placeholder="Filter queues by name..." onkeyup="filterTable()">
+            </div>
+            <table id="topicsTable">
                 <thead>
                     <tr>
                         <th>Queue / Topic Name</th>
                         <th style="text-align: center;">Waiting Consumers</th>
                         <th style="text-align: right;">Messages in RAM</th>
-                        <th style="text-align: right; padding-right: 20px;">Actions</th>
+                        <th style="text-align: right; padding-right: 10px;">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     {{range .Topics}}
-                    <tr class="{{if .IsDLQ}}is-dlq{{end}}">
+                    <tr class="topic-row {{if .IsDLQ}}is-dlq{{end}}">
                         <td>
                             <span class="topic-name">{{.Name}}</span>
                             {{if .IsDLQ}}<span class="badge dlq">DLQ</span>{{end}}
-                            {{if .HasWebhooks}}<span class="badge webhook">Webhook</span>{{end}}
+                            {{if .HasWebhooks}}
+                                <span class="badge webhook" onclick="openWebhookModal('{{.Name}}')" title="View Webhooks">Webhooks</span>
+                            {{else}}
+                                <span class="badge webhook" style="background:#cbd5e0; color:#718096;" onclick="openWebhookModal('{{.Name}}')" title="Add Webhook">Add</span>
+                            {{end}}
                         </td>
                         <td style="text-align: center;">
                             {{if gt .WaitingConsumers 0}}
                                 <span class="consumer-count"> {{.WaitingConsumers}}</span>
                             {{else}}
-                                <span style="color: #cbd5e0;">0</span>
+                                <span style="color: var(--muted-color);">0</span>
                             {{end}}
                         </td>
                         <td style="text-align: right;"><span class="msg-count">{{.MessageCount}}</span></td>
                         <td>
                             <div class="row-actions">
-                                <button class="btn-sm btn-pub" onclick="openPublishModal('{{.Name}}')">Publish</button>
-                                <button class="btn-sm btn-sub" onclick="consumeMessage('{{.Name}}')">Consume (Pop)</button>
-                                <button class="btn-sm btn-peek" onclick="peekQueue('{{.Name}}')">👁️ Peek</button>
+                                <button class="btn-sm btn-pub" onclick="openPublishModal('{{.Name}}')" title="Publish Message">Pub</button>
+                                <button class="btn-sm btn-sub" onclick="consumeMessage('{{.Name}}')" title="Consume Message">Sub</button>
+                                <button class="btn-sm btn-peek" onclick="peekQueue('{{.Name}}')" title="Peek RAM"></button>
+                                <div style="border-left: 1px solid var(--border-light); height: 16px; margin: 0 4px;"></div>
+                                <button class="btn-sm btn-danger" onclick="purgeQueue('{{.Name}}')" title="Purge Queue">Purge</button>
+                                <button class="btn-sm btn-danger" onclick="deleteQueue('{{.Name}}')" title="Delete Queue"></button>
                             </div>
                         </td>
                     </tr>
                     {{else}}
                     <tr>
-                        <td colspan="4" class="empty">No queues in memory at this moment.</td>
+                        <td colspan="4" style="text-align: center; color: var(--muted-color); padding: 40px 0;">No queues in memory at this moment.</td>
                     </tr>
                     {{end}}
                 </tbody>
@@ -167,6 +238,25 @@
         <div class="modal">
             <button class="modal-close" onclick="closeModals()">✖</button>
             <h2>Publish to <span id="pubTargetName" style="color: #3182ce;"></span></h2>
+            
+            <div class="flex-row">
+                <div class="form-group" style="flex: 1;">
+                    <label>TTL (Optional)</label>
+                    <input type="text" id="pubTtl" placeholder="e.g. 5m, 1h">
+                </div>
+                <div class="form-group" style="flex: 1;">
+                    <label>Delay (Optional)</label>
+                    <input type="text" id="pubDelay" placeholder="e.g. 10s, 2m">
+                </div>
+                <div class="form-group toggle-container" style="flex: 1; padding-bottom: 10px;">
+                    <label class="switch">
+                        <input type="checkbox" id="pubBroadcast">
+                        <span class="slider"></span>
+                    </label>
+                    <span style="font-size: 13px;">Broadcast</span>
+                </div>
+            </div>
+
             <div class="form-group">
                 <label>Payload (JSON format recommended)</label>
                 <textarea id="pubPayload">{"hello": "world", "timestamp": 123456}</textarea>
@@ -175,12 +265,33 @@
         </div>
     </div>
 
+    <div id="webhookModal" class="modal-overlay">
+        <div class="modal">
+            <button class="modal-close" onclick="closeModals()">✖</button>
+            <h2>Webhooks for <span id="whTargetName" style="color: #ed8936;"></span></h2>
+            
+            <div id="whList" style="max-height: 200px; overflow-y: auto; margin-bottom: 15px;">
+            </div>
+
+            <div class="form-group" style="border-top: 1px solid var(--border-light); padding-top: 15px;">
+                <label>Register New Webhook URL</label>
+                <div style="display: flex; gap: 10px;">
+                    <input type="text" id="whUrlInput" placeholder="https://api.example.com/incoming" style="flex: 1;">
+                    <button class="btn-sm btn-pub" onclick="registerWebhook()" style="padding: 0 15px;">Add</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="consumeModal" class="modal-overlay">
         <div class="modal">
             <button class="modal-close" onclick="closeModals()">✖</button>
             <h2>Message Consumed!</h2>
-            <p style="font-size: 14px; color: #718096; margin-top: 0;">Pulled from: <strong id="subTargetName"></strong></p>
-            <div class="console-output" id="consumeOutput">Loading...</div>
+            <p style="font-size: 14px; color: var(--muted-color); margin-top: 0;">Pulled from: <strong id="subTargetName"></strong></p>
+            <div class="console-output" id="consumeOutput">
+                <button class="copy-btn" onclick="copyToClipboard('consumeText')">Copy</button>
+                <span id="consumeText">Loading...</span>
+            </div>
         </div>
     </div>
 
@@ -188,16 +299,29 @@
         <div class="modal" style="max-width: 600px;">
             <button class="modal-close" onclick="closeModals()">✖</button>
             <h2>Messages on RAM</h2>
-            <p style="font-size: 14px; color: #718096; margin-top: 0;">Peeking at: <strong id="peekTargetName"></strong></p>
-            <div id="peekOutput" style="max-height: 350px; overflow-y: auto;">
-                </div>
+            <p style="font-size: 14px; color: var(--muted-color); margin-top: 0;">Peeking at: <strong id="peekTargetName"></strong></p>
+            <div id="peekOutput" style="max-height: 350px; overflow-y: auto;"></div>
         </div>
     </div>
 
     <script>
+        const themeToggle = document.getElementById('themeToggle');
+        if(localStorage.getItem('tinymq_theme') === 'dark') {
+            document.body.setAttribute('data-theme', 'dark');
+            themeToggle.checked = true;
+        }
+        themeToggle.addEventListener('change', (e) => {
+            if(e.target.checked) {
+                document.body.setAttribute('data-theme', 'dark');
+                localStorage.setItem('tinymq_theme', 'dark');
+            } else {
+                document.body.removeAttribute('data-theme');
+                localStorage.setItem('tinymq_theme', 'light');
+            }
+        });
+
         const toggle = document.getElementById('autoRefreshToggle');
         toggle.checked = localStorage.getItem('tinymq_autorefresh') === 'true';
-
         let refreshInterval;
         let isModalOpen = false;
 
@@ -208,84 +332,126 @@
                 clearTimeout(refreshInterval);
             }
         };
-
         toggle.addEventListener('change', (e) => {
             localStorage.setItem('tinymq_autorefresh', e.target.checked);
             manageRefresh();
         });
         manageRefresh();
 
+        // --- Utils ---
+        function showToast(msg, isError = false) {
+            const toast = document.getElementById("toast");
+            toast.innerText = msg;
+            toast.style.backgroundColor = isError ? "#e53e3e" : "#48bb78";
+            toast.className = "show";
+            setTimeout(() => { toast.className = toast.className.replace("show", ""); }, 3000);
+        }
+
+        function filterTable() {
+            let input = document.getElementById("searchInput").value.toUpperCase();
+            let rows = document.querySelectorAll(".topic-row");
+            rows.forEach(row => {
+                let topicName = row.querySelector(".topic-name").innerText.toUpperCase();
+                row.style.display = topicName.includes(input) ? "" : "none";
+            });
+        }
+
+        function copyToClipboard(elementId) {
+            let text = document.getElementById(elementId).innerText;
+            navigator.clipboard.writeText(text).then(() => showToast("Copied to clipboard!"));
+        }
+
+        function copyRawText(text) {
+            navigator.clipboard.writeText(text).then(() => showToast("Payload copied!"));
+        }
+
+        function closeModals() {
+            document.querySelectorAll('.modal-overlay').forEach(el => el.style.display = 'none');
+            isModalOpen = false;
+            manageRefresh(); 
+        }
+
+        let currentTargetQueue = "";
+
         async function createNewTopic() {
-            const topicName = prompt("Enter the name of the new Queue/Topic (e.g., 'orders.process'):");
+            const topicName = prompt("Enter Queue/Topic name (e.g., 'orders.process'):");
             if (!topicName || topicName.trim() === "") return;
             const validRegex = /^[a-zA-Z0-9._-]+$/;
             
             if (!validRegex.test(topicName.trim())) {
-                alert("❌ Invalid name. Only letters, numbers, periods, hyphens, and underscores are allowed.");
+                showToast("Invalid name format.", true);
                 return;
             }
-
             try {
                 const res = await fetch('/api/topics', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name: topicName.trim() })
                 });
-
-                if (!res.ok) alert("⚠️ Broker Error: " + await res.text());
-                else location.reload();
+                if (!res.ok) showToast("Broker Error: " + await res.text(), true);
+                else { showToast("Topic Created!"); setTimeout(() => location.reload(), 500); }
             } catch (e) {
-                alert("❌ Network Error: The broker could not be reached.");
+                showToast("Network Error.", true);
             }
         }
 
-        let currentTargetQueue = "";
+        async function purgeQueue(queueName) {
+            if(!confirm(`⚠️ Are you sure you want to PURGE all messages from '${queueName}'?\nThis action cannot be undone.`)) return;
+            try {
+                const res = await fetch(`/api/queues/purge?queue=${encodeURIComponent(queueName)}`, { method: 'DELETE' });
+                if(res.ok) { showToast(`Queue purged.`); setTimeout(() => location.reload(), 500); }
+                else showToast("Error purging queue", true);
+            } catch(e) { showToast("Network error", true); }
+        }
+
+        async function deleteQueue(queueName) {
+            if(!confirm(`❌ Are you sure you want to DELETE '${queueName}' entirely?\nThis will destroy the queue and its log file.`)) return;
+            try {
+                const res = await fetch(`/api/queues/delete?queue=${encodeURIComponent(queueName)}`, { method: 'DELETE' });
+                if(res.ok) { showToast(`Queue deleted.`); setTimeout(() => location.reload(), 500); }
+                else showToast("Error deleting queue", true);
+            } catch(e) { showToast("Network error", true); }
+        }
 
         function openPublishModal(queueName) {
             currentTargetQueue = queueName;
             document.getElementById('pubTargetName').innerText = queueName;
+            document.getElementById('pubTtl').value = '';
+            document.getElementById('pubDelay').value = '';
+            document.getElementById('pubBroadcast').checked = false;
             document.getElementById('publishModal').style.display = 'flex';
-            isModalOpen = true; 
-            manageRefresh();
-        }
-
-        function closeModals() {
-            document.getElementById('publishModal').style.display = 'none';
-            document.getElementById('consumeModal').style.display = 'none';
-            document.getElementById('peekModal').style.display = 'none';
-            isModalOpen = false;
-            manageRefresh(); 
+            isModalOpen = true; manageRefresh();
         }
 
         async function submitPublish() {
             const payload = document.getElementById('pubPayload').value;
             if(!payload) return;
 
+            const reqBody = {
+                queue: currentTargetQueue,
+                payload: payload,
+                ttl: document.getElementById('pubTtl').value,
+                delay: document.getElementById('pubDelay').value,
+                broadcast: document.getElementById('pubBroadcast').checked
+            };
+
             try {
                 const res = await fetch('/api/queues/publish', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ queue: currentTargetQueue, payload: payload })
+                    body: JSON.stringify(reqBody)
                 });
-                
                 if(res.ok) {
-                    closeModals();
-                    location.reload(); 
-                } else {
-                    alert("Error publishing message");
-                }
-            } catch(e) {
-                alert("Network error");
-            }
+                    closeModals(); showToast("Message Published!"); setTimeout(() => location.reload(), 500); 
+                } else { showToast("Error publishing message", true); }
+            } catch(e) { showToast("Network error", true); }
         }
 
         async function consumeMessage(queueName) {
-            isModalOpen = true;
-            manageRefresh();
-            
+            isModalOpen = true; manageRefresh();
             document.getElementById('subTargetName').innerText = queueName;
-            const output = document.getElementById('consumeOutput');
-            output.innerText = "Fetching message from broker...";
+            const outputText = document.getElementById('consumeText');
+            outputText.innerText = "Fetching message from broker...";
             document.getElementById('consumeModal').style.display = 'flex';
 
             try {
@@ -296,36 +462,26 @@
                 });
                 
                 if (res.status === 204) {
-                    output.style.color = "#a0aec0";
-                    output.innerText = "// Queue is empty.\n// No pending messages to process.";
+                    outputText.innerText = "// Queue is empty.\n// No pending messages to process.";
                     return;
                 }
                 
                 const data = await res.json();
-
-                let formattedOutput = `ID: ${data.id}\n`;
-                formattedOutput += `Timestamp: ${new Date(data.timestamp).toLocaleString()}\n`;
+                let formattedOutput = `ID: ${data.id}\nTimestamp: ${new Date(data.timestamp).toLocaleString()}\n`;
+                if(data.retry_count > 0) formattedOutput += `Retries: ${data.retry_count}\n`;
             
                 try {
                     const parsedPayload = JSON.parse(atob(data.payload)); 
-                    formattedOutput += `\nPayload (JSON):\n${JSON.stringify(parsedPayload, null, 2)}`;
+                    formattedOutput += `\nPayload:\n${JSON.stringify(parsedPayload, null, 2)}`;
                 } catch(e) {
-                    formattedOutput += `\nPayload (Raw):\n${data.payload || atob(data.payload || '')}`;
+                    formattedOutput += `\nPayload:\n${data.payload || atob(data.payload || '')}`;
                 }
-
-                output.style.color = "#a3e635";
-                output.innerText = formattedOutput;
-                
-            } catch(e) {
-                output.style.color = "#e53e3e";
-                output.innerText = "Error trying to consume from the broker.\n" + e;
-            }
+                outputText.innerText = formattedOutput;
+            } catch(e) { outputText.innerText = "Error consuming from broker."; }
         }
 
         async function peekQueue(queueName) {
-            isModalOpen = true;
-            manageRefresh(); 
-            
+            isModalOpen = true; manageRefresh(); 
             document.getElementById('peekTargetName').innerText = queueName;
             const output = document.getElementById('peekOutput');
             output.innerHTML = "<p>Checking with the Broker...</p>";
@@ -336,7 +492,7 @@
                 const messages = await res.json();
                 
                 if (!messages || messages.length === 0) {
-                    output.innerHTML = "<div class='peek-msg-card' style='color: #a0aec0;'>// The queue/topic is completely empty.</div>";
+                    output.innerHTML = "<div class='peek-msg-card' style='color: var(--muted-color);'>// The queue is completely empty.</div>";
                     return;
                 }
                 
@@ -344,24 +500,57 @@
                 messages.forEach((msg, index) => {
                     let rawStr = atob(msg.payload);
                     let displayPayload = rawStr;
-
-                    try {
-                        displayPayload = JSON.stringify(JSON.parse(rawStr), null, 2);
-                    } catch(e) {}
+                    try { displayPayload = JSON.stringify(JSON.parse(rawStr), null, 2); } catch(e) {}
+                    let safePayload = displayPayload.replace(/"/g, '&quot;').replace(/'/g, "\\'");
 
                     html += `
                     <div class="peek-msg-card">
+                        <button class="copy-btn" onclick="copyRawText('${safePayload}')">Copy</button>
                         <span style="color:#4db8ff; font-weight:bold;">#${index + 1} | ID: ${msg.id}</span>
                         <hr style="border-color: #2d3748; margin: 8px 0;">
                         ${displayPayload}
                     </div>`;
                 });
-                
                 output.innerHTML = html;
-                
-            } catch(e) {
-                output.innerHTML = `<div class='peek-msg-card' style='color: #e53e3e;'>Network error trying to peek at the queue/topic.</div>`;
-            }
+            } catch(e) { output.innerHTML = `<div class='peek-msg-card' style='color: #e53e3e;'>Network error trying to peek.</div>`; }
+        }
+
+        async function openWebhookModal(queueName) {
+            currentTargetQueue = queueName;
+            document.getElementById('whTargetName').innerText = queueName;
+            document.getElementById('whUrlInput').value = '';
+            const whList = document.getElementById('whList');
+            whList.innerHTML = "<p style='color: var(--muted-color); font-size: 13px;'>Loading webhooks...</p>";
+            
+            document.getElementById('webhookModal').style.display = 'flex';
+            isModalOpen = true; manageRefresh();
+
+            try {
+                const res = await fetch(`/api/queues/webhooks?queue=${encodeURIComponent(queueName)}`);
+                const urls = await res.json();
+                if(urls.length === 0) {
+                    whList.innerHTML = "<div class='wh-item' style='color: var(--muted-color); text-align:center;'>No webhooks registered yet.</div>";
+                } else {
+                    whList.innerHTML = urls.map(url => `<div class='wh-item'> ${url}</div>`).join('');
+                }
+            } catch(e) { whList.innerHTML = "<p style='color: #e53e3e;'>Error loading webhooks</p>"; }
+        }
+
+        async function registerWebhook() {
+            const url = document.getElementById('whUrlInput').value;
+            if(!url.startsWith("http")) { showToast("URL must start with http/https", true); return; }
+
+            try {
+                const res = await fetch(`/webhook/${encodeURIComponent(currentTargetQueue)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: url })
+                });
+                if(res.ok) {
+                    showToast("Webhook registered!");
+                    openWebhookModal(currentTargetQueue); 
+                } else { showToast("Error registering webhook", true); }
+            } catch(e) { showToast("Network error", true); }
         }
     </script>
 </body>

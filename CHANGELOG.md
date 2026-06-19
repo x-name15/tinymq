@@ -3,6 +3,29 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+
+---
+## [2.1.0] - 2026-06-19 — Expand Dashboard Functionality
+## Added
+
+- **Dashboard:** Upgraded the embedded HTML interface to support advanced broker controls without adding any external dependencies. The dashboard now features:
+  - **Live Search:** Filter queues in real-time.
+  - **Native Dark Mode:** With `localStorage` preference saving.
+  - **Toast Notifications & Clipboard Integration:** Replaced native browser alerts with custom toasts and added 1-click "Copy Payload" buttons for easier debugging.
+- **Advanced Publish Control:** The UI now exposes the full power of the Go SDK. Users can publish messages with `TTL`, `Delay`, and `Broadcast` flags directly from the browser.
+- **Destructive Queue Management:** Added `Purge` (empty queue) and `Delete` (destroy queue and log file) capabilities directly to the UI.
+- **Webhook Inspection:** Users can now click the Webhook badge in the dashboard to view the exact URLs registered to a specific topic.
+- **New API Endpoints:** Introduced `DELETE /api/queues/purge`, `DELETE /api/queues/delete`, and `GET /api/queues/webhooks` to support the new dashboard features.
+
+## Changed
+
+- **Storage Engine Extensions:** Upgraded `internal/storage/storage.go` with `ClearLog` and `DeleteLog` methods to natively support truncating or removing `.log` files without blocking the global mutex.
+
+## Fixed
+
+- **Critical Persistence Bug (Empty Queues):** Fixed an issue in `LoadExistingTopics` where fully consumed queues (0 messages in RAM, but existing `.log` file) were ignored during broker startup. Empty queues are now properly loaded into RAM, ensuring they remain visible in the dashboard and are correctly auto-compacted after a container restart.
+
+---
 ## [2.0.0] - 2026-06-18 — The "Featherweight Fortress" Update
 ## Added
 ...

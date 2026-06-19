@@ -331,17 +331,36 @@ func (s *Server) handleQueuePublish(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 
 	var req struct {
-		Queue   string `json:"queue"`
-		Payload string `json:"payload"`
+		Queue     string `json:"queue"`
+		Payload   string `json:"payload"`
+		TTL       string `json:"ttl,omitempty"`
+		Delay     string `json:"delay,omitempty"`
+		Broadcast bool   `json:"broadcast,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Queue == "" {
-		http.Error(w, "Invalid payload or too large (Max 2MB). Expected {\"queue\": \"...\", \"payload\": \"...\"}", http.StatusBadRequest)
+		http.Error(w, "Invalid payload. Expected {\"queue\": \"...\", \"payload\": \"...\"}", http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
 
-	err := s.broker.Publish(req.Queue, []byte(req.Payload), nil, nil, false)
+	var expiresAt *time.Time
+	if req.TTL != "" {
+		if d, err := time.ParseDuration(req.TTL); err == nil {
+			exp := time.Now().Add(d)
+			expiresAt = &exp
+		}
+	}
+
+	var deliverAt *time.Time
+	if req.Delay != "" {
+		if d, err := time.ParseDuration(req.Delay); err == nil {
+			del := time.Now().Add(d)
+			deliverAt = &del
+		}
+	}
+
+	err := s.broker.Publish(req.Queue, []byte(req.Payload), expiresAt, deliverAt, req.Broadcast)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 		return
@@ -350,7 +369,7 @@ func (s *Server) handleQueuePublish(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte(fmt.Sprintf(`{"status": "accepted", "queue": "%s"}`, req.Queue)))
-	log.Printf("[API-QUEUES] Message published in queue: %s\n", req.Queue)
+	log.Printf("[API-QUEUES] Message published via UI in: %s\n", req.Queue)
 }
 
 func (s *Server) handleQueueConsume(w http.ResponseWriter, r *http.Request) {
@@ -404,6 +423,47 @@ func (s *Server) handleQueuePeek(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(msgs)
 }
+
+func (s *Server) handleQueuePurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	queue := r.URL.Query().Get("queue")
+	if err := s.broker.Purge(queue); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	queue := r.URL.Query().Get("queue")
+	if err := s.broker.DeleteTopic(queue); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleGetWebhooks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	queue := r.URL.Query().Get("queue")
+	urls := s.broker.GetWebhooks(queue)
+	if urls == nil {
+		urls = []string{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(urls)
+}
+
 
 func main() {
 	log.Printf("Starting TinyMQ v%s...\n", Version)
@@ -463,6 +523,9 @@ func main() {
 	mux.HandleFunc("/api/queues/publish", srv.handleQueuePublish)
 	mux.HandleFunc("/api/queues/consume", srv.handleQueueConsume)
 	mux.HandleFunc("/api/queues/peek", srv.handleQueuePeek)
+	mux.HandleFunc("/api/queues/purge", srv.handleQueuePurge)
+	mux.HandleFunc("/api/queues/delete", srv.handleQueueDelete)
+	mux.HandleFunc("/api/queues/webhooks", srv.handleGetWebhooks)
 
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		stats, totalWebhooks := b.GetStats()

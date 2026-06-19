@@ -211,3 +211,36 @@ func (s *DiskStorage) CloseAll() error {
 	}
 	return nil
 }
+
+func (s *DiskStorage) ClearLog(topic string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if file, exists := s.activeFiles[topic]; exists {
+		file.Close()
+	}
+	
+	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topic))
+	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err == nil {
+		s.activeFiles[topic] = file
+	}
+	return err
+}
+
+func (s *DiskStorage) DeleteLog(topic string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if file, exists := s.activeFiles[topic]; exists {
+		file.Close()
+		delete(s.activeFiles, topic)
+	}
+	
+	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topic))
+	err := os.Remove(filename)
+	if os.IsNotExist(err) {
+		return nil 
+	}
+	return err
+}

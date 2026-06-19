@@ -60,15 +60,18 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 			log.Printf("Failed to recover topic %s: %v\n", name, err)
 			continue
 		}
-		
+
+		b.mu.Lock()
+		b.Topics[name] = &Topic{
+			Name:     name,
+			Messages: msgs, 
+		}
+		b.mu.Unlock()
+
 		if len(msgs) > 0 {
-			b.mu.Lock()
-			b.Topics[name] = &Topic{
-				Name:     name,
-				Messages: msgs,
-			}
-			b.mu.Unlock()
 			log.Printf("Recovered topic '%s' with %d unacknowledged messages from disk\n", name, len(msgs))
+		} else {
+			log.Printf("Recovered empty topic '%s' from disk\n", name)
 		}
 	}
 }
@@ -452,4 +455,53 @@ func (b *Broker) TopicExists(name string) bool {
 	defer b.mu.RUnlock()
 	_, exists := b.Topics[name]
 	return exists
+}
+
+func (b *Broker) Purge(topicName string) error {
+	b.mu.RLock()
+	t, exists := b.Topics[topicName]
+	b.mu.RUnlock()
+
+	if !exists {
+		return errors.New("queue not found")
+	}
+
+	t.mu.Lock()
+	t.Messages = nil 
+	t.mu.Unlock()
+
+	if b.storage != nil {
+		b.storage.ClearLog(topicName)
+	}
+	log.Printf("Queue '%s' purged completely.\n", topicName)
+	return nil
+}
+
+func (b *Broker) DeleteTopic(topicName string) error {
+	b.mu.Lock()
+	if _, exists := b.Topics[topicName]; !exists {
+		b.mu.Unlock()
+		return errors.New("queue not found")
+	}
+
+	delete(b.Topics, topicName)
+	delete(b.webhooks, topicName)
+	delete(b.compiledRegex, topicName)
+	b.mu.Unlock()
+
+	if b.storage != nil {
+		b.storage.DeleteLog(topicName)
+	}
+	log.Printf("Queue '%s' deleted.\n", topicName)
+	return nil
+}
+
+func (b *Broker) GetWebhooks(topicName string) []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	
+	urls := b.webhooks[topicName]
+	result := make([]string, len(urls))
+	copy(result, urls)
+	return result
 }
