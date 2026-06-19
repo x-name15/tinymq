@@ -44,6 +44,11 @@ TinyMQ solves the "over-engineering" problem. It is built for developers who nee
 ![TinyMQ Dashboard](images/tinymq-dash.png)
 - All in HTML & Vanilla JS btw
 
+## Documentation
+
+See the full documentation in the [`docs` folder](./docs/DOCUMENTATION.md) for API reference, SDK usage, and architecture details.
+For more details, visit the official documentation website: [TinyMQ Docs](https://tinymq.mrjacket.dev/)
+
 ## Quick Start (Docker)
 
 ### Using the pre-built Docker images
@@ -80,10 +85,6 @@ docker compose up --build
 ```
 
 The broker will start on port `7800`. Data persists locally in the `./data` directory. Access the UI at `http://localhost:7800/dashboard`.
-
-## Documentation
-
-See the full documentation in the [`docs` folder](./docs/DOCUMENTATION.md) for API reference, SDK usage, and architecture details.
 
 ## LICENSE
 TinyMQ is licensed under the GPL v3. See [`LICENSE`](./LICENSE) for details.
