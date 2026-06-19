@@ -1,3 +1,3 @@
-module tinymq
+module github.com/x-name15/tinymq
 
-go 1.23.0
+go 1.26.0

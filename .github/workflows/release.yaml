@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write 
+      packages: write
 
     steps:
       - name: Checkout
@@ -21,7 +21,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23' 
+          go-version: '1.26'
 
       - name: Get version from CHANGELOG
         id: version
@@ -61,10 +61,18 @@ jobs:
       - name: Build Binaries
         run: |
           mkdir dist
+
+          # tinymq (server)
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-windows-amd64.exe ./cmd/tinymq
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-linux-amd64 ./cmd/tinymq
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-darwin-amd64 ./cmd/tinymq
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/tinymq-darwin-arm64 ./cmd/tinymq
+          GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-linux-amd64       ./cmd/tinymq
+          GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-darwin-amd64      ./cmd/tinymq
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/tinymq-darwin-arm64      ./cmd/tinymq
+
+          # tmq (CLI)
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/tmq-windows-amd64.exe ./cmd/tmq
+          GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/tmq-linux-amd64       ./cmd/tmq
+          GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/tmq-darwin-amd64      ./cmd/tmq
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/tmq-darwin-arm64      ./cmd/tmq
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -76,13 +84,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Registries
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:

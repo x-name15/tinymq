@@ -18,9 +18,9 @@ import (
 	"runtime"
 	"strconv"
 
-	"tinymq/internal/broker"
-	"tinymq/internal/storage"
-	"tinymq/internal/message"
+	"github.com/x-name15/tinymq/internal/broker"
+	"github.com/x-name15/tinymq/internal/storage"
+	"github.com/x-name15/tinymq/internal/message"
 )
 
 type Server struct {
@@ -47,12 +47,14 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	topic := parts[2]
 
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+
 	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
 	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		http.Error(w, "Payload too large or unreadable (Max 2MB)", http.StatusRequestEntityTooLarge)
 		return
 	}
-	defer r.Body.Close()
 
 	if len(body) == 0 {
 		http.Error(w, "Payload is empty", http.StatusBadRequest)
@@ -86,82 +88,77 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodGet {
-        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-        return
-    }
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-    parts := strings.Split(r.URL.Path, "/")
-    if len(parts) < 3 || parts[2] == "" {
-        http.Error(w, "Topic is required. Usage: GET /consume/{topic}", http.StatusBadRequest)
-        return
-    }
-    topic := parts[2]
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 3 || parts[2] == "" {
+		http.Error(w, "Topic is required. Usage: GET /consume/{topic}", http.StatusBadRequest)
+		return
+	}
+	topic := parts[2]
 
-    timeoutStr := r.URL.Query().Get("timeout")
-    var timeout time.Duration
-    if timeoutStr == "" {
-        timeout = 0 * time.Second 
-    } else {
-        var err error
-        timeout, err = time.ParseDuration(timeoutStr)
-        if err != nil {
-            http.Error(w, "Invalid timeout format. Example: 5s, 500ms", http.StatusBadRequest)
-            return
-        }
-    }
+	timeoutStr := r.URL.Query().Get("timeout")
+	var timeout time.Duration
+	if timeoutStr != "" {
+		var err error
+		timeout, err = time.ParseDuration(timeoutStr)
+		if err != nil {
+			http.Error(w, "Invalid timeout format. Example: 5s, 500ms", http.StatusBadRequest)
+			return
+		}
+	}
 
-    limit := 1
-    if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-        if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
-            limit = parsedLimit
-        }
-    }
+	limit := 1
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
 
-    notifyChan := make(chan message.Message, 1)
+	notifyChan := make(chan message.Message, 1)
+	msgs, ok := s.broker.Consume(topic, limit, notifyChan)
 
-    msgs, ok := s.broker.Consume(topic, limit, notifyChan)
+	if !ok && timeout > 0 {
+		log.Printf("Topic '%s' empty. Consumer waiting for up to %v...\n", topic, timeout)
 
-    if !ok && timeout > 0 {
-        log.Printf("Topic '%s' empty. Consumer waiting for up to %v...\n", topic, timeout)
-        
-        select {
-        case receivedMsg := <-notifyChan:
-            msgs = []message.Message{receivedMsg}
-            ok = true
-        case <-time.After(timeout):
-            s.broker.RemoveWaitingConsumer(topic, notifyChan)
-        case <-r.Context().Done():
-            log.Printf("Consumer disconnected prematurely from topic '%s'. Cleaning up...\n", topic)
-            s.broker.RemoveWaitingConsumer(topic, notifyChan)
-            return
-        }
-    }
+		select {
+		case receivedMsg := <-notifyChan:
+			msgs = []message.Message{receivedMsg}
+			ok = true
+		case <-time.After(timeout):
+			s.broker.RemoveWaitingConsumer(topic, notifyChan)
+		case <-r.Context().Done():
+			log.Printf("Consumer disconnected prematurely from topic '%s'. Cleaning up...\n", topic)
+			s.broker.RemoveWaitingConsumer(topic, notifyChan)
+			return
+		}
+	}
 
-    if !ok || len(msgs) == 0 {
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusNotFound)
-        w.Write([]byte(`{"status": "empty", "message": "No messages in topic"}`))
-        return
-    }
+	if !ok || len(msgs) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"status": "empty", "message": "No messages in topic"}`))
+		return
+	}
 
-    autoAckParam := r.URL.Query().Get("auto_ack")
-    if autoAckParam == "true" {
-        for _, m := range msgs {
-            s.broker.Ack(topic, m.ID)
-            log.Printf("Auto-Acknowledged message %s in topic: %s\n", m.ID, topic)
-        }
-    }
+	autoAckParam := r.URL.Query().Get("auto_ack")
+	if autoAckParam == "true" {
+		for _, m := range msgs {
+			s.broker.Ack(topic, m.ID)
+			log.Printf("Auto-Acknowledged message %s in topic: %s\n", m.ID, topic)
+		}
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    
-    if limit == 1 && len(msgs) == 1 {
-        json.NewEncoder(w).Encode(msgs[0])
-    } else {
-        json.NewEncoder(w).Encode(msgs)
-    }
-    
-    log.Printf("Consumed %d message(s) from topic: %s\n", len(msgs), topic)
+	w.Header().Set("Content-Type", "application/json")
+	if limit == 1 && len(msgs) == 1 {
+		json.NewEncoder(w).Encode(msgs[0])
+	} else {
+		json.NewEncoder(w).Encode(msgs)
+	}
+	log.Printf("Consumed %d message(s) from topic: %s\n", len(msgs), topic)
 }
 
 func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +191,7 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	stats, totalWebhooks := s.broker.GetStats()
-	
+
 	totalMsgs := 0
 	for _, stat := range stats {
 		totalMsgs += stat.MessageCount
@@ -208,15 +205,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TotalTopics     int
 		TotalMessages   int
 		MemoryAllocated string
-		Uptime          string 
-		TotalWebhooks   int   
+		Uptime          string
+		TotalWebhooks   int
 		Topics          []broker.TopicStat
 	}{
-		Version:         Version, 
+		Version:         Version,
 		TotalTopics:     len(stats),
 		TotalMessages:   totalMsgs,
 		MemoryAllocated: fmt.Sprintf("%.2f MB", float64(m.Alloc)/1024/1024),
-		Uptime:          time.Since(startTime).Round(time.Second).String(), 
+		Uptime:          time.Since(startTime).Round(time.Second).String(),
 		TotalWebhooks:   totalWebhooks,
 		Topics:          stats,
 	}
@@ -239,6 +236,21 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
+
+	if msg.ID == "" || msg.Topic == "" {
+		http.Error(w, "Invalid message: id and topic are required", http.StatusBadRequest)
+		return
+	}
+
+	if !s.broker.IsValidTopicName(msg.Topic) {
+		http.Error(w, "Invalid topic name", http.StatusBadRequest)
+		return
+	}
+
+	if !s.broker.TopicExists(msg.Topic) {
+		http.Error(w, "Topic not found", http.StatusNotFound)
+		return
+	}
 
 	s.broker.Requeue(msg)
 
@@ -283,7 +295,7 @@ func (s *Server) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		Name string `json:"name"`
 	}
-	
+
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
@@ -291,7 +303,7 @@ func (s *Server) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	if err := s.broker.CreateTopic(payload.Name); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict) 
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 
@@ -299,10 +311,103 @@ func (s *Server) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status": "topic_created"}`))
 }
 
+func (s *Server) handleListQueues(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stats, _ := s.broker.GetStats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+func (s *Server) handleQueuePublish(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+
+	var req struct {
+		Queue   string `json:"queue"`
+		Payload string `json:"payload"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Queue == "" {
+		http.Error(w, "Invalid payload or too large (Max 2MB). Expected {\"queue\": \"...\", \"payload\": \"...\"}", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	err := s.broker.Publish(req.Queue, []byte(req.Payload), nil, nil, false)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte(fmt.Sprintf(`{"status": "accepted", "queue": "%s"}`, req.Queue)))
+	log.Printf("[API-QUEUES] Message published in queue: %s\n", req.Queue)
+}
+
+func (s *Server) handleQueueConsume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Queue string `json:"queue"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Queue == "" {
+		http.Error(w, "Invalid payload. Expected {\"queue\": \"...\"}", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	notifyChan := make(chan message.Message, 1)
+	msgs, ok := s.broker.Consume(req.Queue, 1, notifyChan)
+
+	if !ok || len(msgs) == 0 {
+		s.broker.RemoveWaitingConsumer(req.Queue, notifyChan)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	s.broker.Ack(req.Queue, msgs[0].ID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(msgs[0])
+	log.Printf("[API-QUEUES] Message consumed from queue: %s\n", req.Queue)
+}
+
+func (s *Server) handleQueuePeek(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	queue := r.URL.Query().Get("queue")
+	if queue == "" {
+		http.Error(w, "Queue is required", http.StatusBadRequest)
+		return
+	}
+	msgs := s.broker.Peek(queue, 10)
+	if msgs == nil {
+		msgs = []message.Message{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(msgs)
+}
 
 func main() {
 	log.Printf("Starting TinyMQ v%s...\n", Version)
-	
+
 	dataDir := "./data"
 	store, err := storage.New(dataDir)
 	if err != nil {
@@ -320,10 +425,10 @@ func main() {
 				topicsToRecover = append(topicsToRecover, topicName)
 			}
 		}
-		
+
 		if len(topicsToRecover) > 0 {
 			b.LoadExistingTopics(topicsToRecover)
-			
+
 			for _, name := range topicsToRecover {
 				if err := store.CompactLog(name); err != nil {
 					log.Printf("Failed to compact log for topic %s: %v\n", name, err)
@@ -344,7 +449,30 @@ func main() {
 	mux.HandleFunc("/webhook/", srv.handleRegisterWebhook)
 	mux.HandleFunc("/api/topics", srv.handleCreateTopic)
 	mux.HandleFunc("/dashboard", srv.handleDashboard)
-	
+
+	mux.HandleFunc("/api/queues", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			srv.handleListQueues(w, r)
+		case http.MethodPost:
+			srv.handleCreateTopic(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/queues/publish", srv.handleQueuePublish)
+	mux.HandleFunc("/api/queues/consume", srv.handleQueueConsume)
+	mux.HandleFunc("/api/queues/peek", srv.handleQueuePeek)
+
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		stats, totalWebhooks := b.GetStats()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"stats":          stats,
+			"total_webhooks": totalWebhooks,
+		})
+	})
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "7800"
@@ -363,23 +491,18 @@ func main() {
 		}
 	}()
 
-	stopChan := make(chan os.Signal, 1)
-	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
-	<-stopChan
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	log.Println("\nShutting down TinyMQ gracefully (Graceful Shutdown)...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	log.Println("Shutting down TinyMQ gracefully...")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
 	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Printf("Error shutting down the HTTP server: %v\n", err)
+		log.Fatalf("Forced shutdown: %v", err)
 	}
 
-	if err := store.CloseAll(); err != nil {
-		log.Printf("Error closing disk logs: %v\n", err)
-	} else {
-		log.Println("All data in memory was successfully persisted to disk.")
-	}
-
-	log.Println("Sayonara!")
+	store.CloseAll()
+	log.Println("TinyMQ stopped.")
 }

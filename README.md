@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg?style=flat-square)](LICENSE)
 [![Latest Release](https://img.shields.io/badge/Release-v1.5.0-green?style=flat-square)](https://github.com/x-name15/tinymq/releases)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/x-name15/tinymq/release.yaml?style=flat-square&logo=githubactions&logoColor=white)](https://github.com/x-name15/tinymq/actions)
-[![Docker Image Size](https://img.shields.io/badge/Image_Size-~25MB-2496ED?style=flat-square&logo=docker)](https://github.com/x-name15/tinymq/pkgs/container/tinymq)
+[![Docker Image Size](https://img.shields.io/badge/Image_Size-~15MB-2496ED?style=flat-square&logo=docker)](https://github.com/x-name15/tinymq/pkgs/container/tinymq)
 [![Docker](https://img.shields.io/badge/Docker-Engine%20%2F%20Desktop-2496ED?style=flat-square&logo=docker)](https://www.docker.com/)
 
 A tiny, ultra-lightweight message broker for side projects, prototypes, and internal tools. 
@@ -14,7 +14,7 @@ TinyMQ offers a true "plug & play" alternative to heavy brokers like RabbitMQ or
 
 ## Key Features
 
-- **Zero Dependencies:** Pure Go implementation under ~25MB.
+- **Zero Dependencies:** Pure Go implementation under ~15MB.
 - **Smart Disk Persistence (WAL):** Messages are persisted to an append-only `.log` file per topic and kept in RAM for fast reads.
 - **Dead Letter Queues (DLQ):** Automatically isolates "poison pill" messages after 3 failed retries to protect your workers.
 - **Time-Based Routing (TTL & Delay):** Schedule delayed messages for the future or set expiration times natively.

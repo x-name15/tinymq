@@ -138,9 +138,75 @@ curl -X POST http://127.0.0.1:7800/api/topics \
 Visit `http://127.0.0.1:7800/dashboard` to access the interactive web interface. Features include:
 - Auto-Refresh mode.
 - Uptime and memory footprint monitoring.
-- Visual indicators for Active Webhooks and Dead Letter Queues (☠️ DLQ).
+- Visual indicators for Active Webhooks and Dead Letter Queues (DLQ).
 - Manual topic creation UI.
 - Real-time waiting consumers tracking.
+
+---
+
+## tmq CLI
+
+`tmq` is a command-line tool to interact with a running TinyMQ broker from your terminal. It runs on your local machine and connects to the broker over HTTP — it does not need to run inside Docker.
+
+### Installation
+
+**Option A — Download a pre-built binary (recommended)**
+
+Go to the [GitHub Releases page](https://github.com/x-name15/tinymq/releases) and download the binary for your platform:
+
+| Platform       | File                      |
+|----------------|---------------------------|
+| Linux (amd64)  | `tmq-linux-amd64`         |
+| macOS (Intel)  | `tmq-darwin-amd64`        |
+| macOS (Apple Silicon) | `tmq-darwin-arm64` |
+| Windows        | `tmq-windows-amd64.exe`   |
+
+On Linux/macOS, make it executable after downloading:
+
+```bash
+chmod +x tmq-linux-amd64
+sudo mv tmq-linux-amd64 /usr/local/bin/tmq
+```
+
+**Option B — Install with Go**
+
+If you have Go 1.23+ installed:
+
+```bash
+go install github.com/x-name15/tinymq/cmd/tmq@latest
+```
+
+> **Note:** This requires the module path in `go.mod` to be `github.com/x-name15/tinymq`. If `go install` fails, use Option A instead.
+
+### Configuration
+
+By default, `tmq` connects to `http://localhost:7800`. To point it at a remote broker, set the `TINYMQ_URL` environment variable:
+
+```bash
+export TINYMQ_URL=http://your-server-ip:7800
+```
+
+### Commands
+
+```bash
+# List all active topics and their status
+tmq status
+
+# Publish a message to a topic
+tmq pub <topic> <payload>
+tmq pub orders.eu '{"user_id": 42}' --ttl=5m
+tmq pub notifications '{"msg": "hello"}' --delay=10s --broadcast
+
+# Consume a message from a topic
+tmq sub <topic>
+tmq sub orders.eu --timeout=10s --limit=5 --auto-ack=false
+
+# Peek at messages without consuming them
+tmq peek <topic>
+
+# Watch a topic in real time
+tmq tail <topic>
+```
 
 ---
 
@@ -206,6 +272,11 @@ func main() {
 }
 ```
 
+### System Limits & Security
+To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
+- **Max Payload Size:** `2 MB` per HTTP request. Exceeding this limit will safely abort the connection and return an `HTTP 413 Request Entity Too Large` error.
+- **Max Queue Capacity (Backpressure):** `100,000` messages per topic in RAM. If consumers are offline and a queue reaches this limit, the broker will reject new messages with an `HTTP 429 Too Many Requests` error to protect the host's memory.
+
 ---
 
 ## Configuration & deployment
@@ -233,7 +304,6 @@ docker run -d \
 TinyMQ writes WAL `.log` files into `./data`. In Docker Compose, mount this path to a persistent volume.
 
 ```yaml
-# docker-compose.yml example
 services:
   tinymq:
     image: ghcr.io/x-name15/tinymq:latest

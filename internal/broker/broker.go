@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"strings"
 	
-	"tinymq/internal/message"
-	"tinymq/internal/storage"
-	"tinymq/internal/helper"
+	"github.com/x-name15/tinymq/internal/message"
+	"github.com/x-name15/tinymq/internal/storage"
+	"github.com/x-name15/tinymq/internal/helper"
 )
 
 type Topic struct {
@@ -27,17 +27,19 @@ type Broker struct {
 	Topics        map[string]*Topic
 	storage       *storage.DiskStorage
 	compiledRegex map[string]*regexp.Regexp
-	webhooks   	  map[string][]string
+	webhooks      map[string][]string
+	webhookClient *http.Client
 }
 
 type TopicStat struct {
-	Name         	 string
-	MessageCount 	 int
+	Name            string
+	MessageCount    int
 	WaitingConsumers int
-	IsDLQ 		 	 bool
-	HasWebhooks 	 bool
-	
+	IsDLQ           bool
+	HasWebhooks     bool
 }
+
+const MaxMessagesPerTopic = 100000
 
 var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
@@ -46,7 +48,8 @@ func New(store *storage.DiskStorage) *Broker {
 		Topics:        make(map[string]*Topic),
 		storage:       store,
 		compiledRegex: make(map[string]*regexp.Regexp),
-		webhooks: make(map[string][]string),
+		webhooks:      make(map[string][]string),
+		webhookClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -70,108 +73,120 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 	}
 }
 
-func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool) {
-    b.mu.Lock()
-    if _, exists := b.Topics[topicName]; !exists {
-        b.Topics[topicName] = &Topic{Name: topicName}
-    }
-    t := b.Topics[topicName]
-    
-    var matchingWildcards []*Topic
-    for name, wildcardT := range b.Topics {
-        if strings.Contains(name, "*") {
-            reg, exists := b.compiledRegex[name]
-            if !exists {
-                regexPattern := "^" + strings.ReplaceAll(name, "*", ".*") + "$"
-                reg, _ = regexp.Compile(regexPattern)
-                b.compiledRegex[name] = reg
-            }
-            if reg != nil && reg.MatchString(topicName) {
-                matchingWildcards = append(matchingWildcards, wildcardT)
-            }
-        }
-    }
-    b.mu.Unlock()
+func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool) error {
+	if !validTopicRegex.MatchString(topicName) {
+		log.Printf("Rejected publish to invalid topic name: %s\n", topicName)
+		return errors.New("invalid topic name")
+	}
 
-    msg := message.Message{
-        ID:        helper.NewUUID(),
-        Topic:     topicName,
-        Payload:   payload,
-        Timestamp: time.Now(),
-        ExpiresAt: expiresAt,
-        DeliverAt: deliverAt,
-    }
+	b.mu.Lock()
+	if _, exists := b.Topics[topicName]; !exists {
+		b.Topics[topicName] = &Topic{Name: topicName}
+	}
+	t := b.Topics[topicName]
 
-    b.mu.RLock()
-    urls := b.webhooks[topicName]
-    b.mu.RUnlock()
+	var matchingWildcards []*Topic
+	for name, wildcardT := range b.Topics {
+		if strings.Contains(name, "*") {
+			reg, exists := b.compiledRegex[name]
+			if !exists {
+				regexPattern := "^" + strings.ReplaceAll(name, "*", ".*") + "$"
+				reg, _ = regexp.Compile(regexPattern)
+				b.compiledRegex[name] = reg
+			}
+			if reg != nil && reg.MatchString(topicName) {
+				matchingWildcards = append(matchingWildcards, wildcardT)
+			}
+		}
+	}
+	b.mu.Unlock()
 
-    if len(urls) > 0 {
-        go func(endpoints []string, data []byte) {
-            for _, u := range endpoints {
-                resp, err := http.Post(u, "application/json", bytes.NewBuffer(data))
-                if err == nil {
-                    resp.Body.Close()
-                }
-            }
-        }(urls, payload)
-    }
+	msg := message.Message{
+		ID:        helper.NewUUID(),
+		Topic:     topicName,
+		Payload:   payload,
+		Timestamp: time.Now(),
+		ExpiresAt: expiresAt,
+		DeliverAt: deliverAt,
+	}
 
-    if isBroadcast {
-        var broadcastChannels []chan message.Message
+	b.mu.RLock()
+	urls := b.webhooks[topicName]
+	b.mu.RUnlock()
 
-        for _, wildcardT := range matchingWildcards {
-            wildcardT.mu.Lock()
-            broadcastChannels = append(broadcastChannels, wildcardT.waitingConsumers...)
-            wildcardT.waitingConsumers = nil 
-            wildcardT.mu.Unlock()
-        }
+	if len(urls) > 0 {
+		go func(endpoints []string, data []byte) {
+			for _, u := range endpoints {
+				resp, err := b.webhookClient.Post(u, "application/json", bytes.NewBuffer(data))
+				if err == nil {
+					resp.Body.Close()
+				} else {
+					log.Printf("Webhook delivery failed to %s: %v\n", u, err)
+				}
+			}
+		}(urls, payload)
+	}
 
-        t.mu.Lock()
-        broadcastChannels = append(broadcastChannels, t.waitingConsumers...)
-        t.waitingConsumers = nil 
-        t.mu.Unlock()
+	if isBroadcast {
+		var broadcastChannels []chan message.Message
 
-        go func(channels []chan message.Message, m message.Message) {
-            for _, ch := range channels {
-                ch <- m
-            }
-        }(broadcastChannels, msg)
+		for _, wildcardT := range matchingWildcards {
+			wildcardT.mu.Lock()
+			broadcastChannels = append(broadcastChannels, wildcardT.waitingConsumers...)
+			wildcardT.waitingConsumers = nil
+			wildcardT.mu.Unlock()
+		}
 
-        return 
-    }
+		t.mu.Lock()
+		broadcastChannels = append(broadcastChannels, t.waitingConsumers...)
+		t.waitingConsumers = nil
+		t.mu.Unlock()
 
-    if b.storage != nil {
-        if err := b.storage.AppendPut(topicName, msg); err != nil {
-            log.Printf("Error persisting PUT record: %v\n", err)
-        }
-    }
+		go func(channels []chan message.Message, m message.Message) {
+			for _, ch := range channels {
+				ch <- m
+			}
+		}(broadcastChannels, msg)
 
-    for _, wildcardT := range matchingWildcards {
-        wildcardT.mu.Lock()
-        if len(wildcardT.waitingConsumers) > 0 {
-            consumerChan := wildcardT.waitingConsumers[0]
-            wildcardT.waitingConsumers[0] = nil
-            wildcardT.waitingConsumers = wildcardT.waitingConsumers[1:]
-            wildcardT.mu.Unlock()
-            consumerChan <- msg 
-            return
-        }
-        wildcardT.mu.Unlock()
-    }
+		return nil
+	}
 
-    t.mu.Lock()
-    defer t.mu.Unlock()
-    
-    if len(t.waitingConsumers) > 0 {
-        consumerChan := t.waitingConsumers[0]
-        t.waitingConsumers[0] = nil
-        t.waitingConsumers = t.waitingConsumers[1:]
-        consumerChan <- msg
-        return
-    }
+	if b.storage != nil {
+		if err := b.storage.AppendPut(topicName, msg); err != nil {
+			log.Printf("Error persisting PUT record: %v\n", err)
+		}
+	}
 
-    t.Messages = append(t.Messages, msg)
+	for _, wildcardT := range matchingWildcards {
+		wildcardT.mu.Lock()
+		if len(wildcardT.waitingConsumers) > 0 {
+			consumerChan := wildcardT.waitingConsumers[0]
+			wildcardT.waitingConsumers[0] = nil
+			wildcardT.waitingConsumers = wildcardT.waitingConsumers[1:]
+			wildcardT.mu.Unlock()
+			consumerChan <- msg
+			return nil
+		}
+		wildcardT.mu.Unlock()
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if len(t.waitingConsumers) > 0 {
+		consumerChan := t.waitingConsumers[0]
+		t.waitingConsumers[0] = nil
+		t.waitingConsumers = t.waitingConsumers[1:]
+		consumerChan <- msg
+		return nil
+	}
+
+	if len(t.Messages) >= MaxMessagesPerTopic {
+		return errors.New("queue capacity reached (max 100,000 messages)")
+	}
+
+	t.Messages = append(t.Messages, msg)
+	return nil
 }
 
 func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
@@ -202,7 +217,7 @@ func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
 
 func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Message) ([]message.Message, bool) {
 	b.mu.Lock()
-	
+
 	if !strings.Contains(topicName, "*") {
 		if _, exists := b.Topics[topicName]; !exists {
 			b.Topics[topicName] = &Topic{Name: topicName}
@@ -234,7 +249,7 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 			t.mu.Lock()
 			results := b.extractMessages(t, limit)
 			t.mu.Unlock()
-			
+
 			if len(results) > 0 {
 				b.mu.Unlock()
 				return results, true
@@ -254,7 +269,6 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 
 	return nil, false
 }
-
 
 func (b *Broker) RemoveWaitingConsumer(topicName string, notifyChan chan message.Message) {
 	b.mu.RLock()
@@ -310,24 +324,31 @@ func (b *Broker) Ack(topicName string, msgID string) bool {
 
 func (b *Broker) GetStats() ([]TopicStat, int) {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
+	topicsCopy := make(map[string]*Topic, len(b.Topics))
+	for k, v := range b.Topics {
+		topicsCopy[k] = v
+	}
+	webhooksCopy := make(map[string][]string, len(b.webhooks))
+	for k, v := range b.webhooks {
+		webhooksCopy[k] = v
+	}
+	b.mu.RUnlock()
 
 	totalWebhooks := 0
-	for _, urls := range b.webhooks {
+	for _, urls := range webhooksCopy {
 		totalWebhooks += len(urls)
 	}
 
-	stats := make([]TopicStat, 0, len(b.Topics))
-	for name, t := range b.Topics {
+	stats := make([]TopicStat, 0, len(topicsCopy))
+	for name, t := range topicsCopy {
 		t.mu.Lock()
-		_, hasWebhook := b.webhooks[name]
-		
+		_, hasWebhook := webhooksCopy[name]
 		stats = append(stats, TopicStat{
 			Name:             name,
 			MessageCount:     len(t.Messages),
 			WaitingConsumers: len(t.waitingConsumers),
 			IsDLQ:            strings.HasSuffix(name, ".dlq"),
-			HasWebhooks:      hasWebhook, 
+			HasWebhooks:      hasWebhook,
 		})
 		t.mu.Unlock()
 	}
@@ -337,12 +358,12 @@ func (b *Broker) GetStats() ([]TopicStat, int) {
 
 func (b *Broker) Requeue(msg message.Message) {
 	msg.RetryCount++
-	
+
 	targetTopic := msg.Topic
 	if msg.RetryCount >= 3 {
 		targetTopic = msg.Topic + ".dlq"
-		msg.Topic = targetTopic 
-		log.Printf("Message %s move to DLQ: %s\n", msg.ID, targetTopic)
+		msg.Topic = targetTopic
+		log.Printf("Message %s moved to DLQ: %s\n", msg.ID, targetTopic)
 	}
 
 	b.mu.Lock()
@@ -360,7 +381,7 @@ func (b *Broker) Requeue(msg message.Message) {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	if len(t.waitingConsumers) > 0 {
 		consumerChan := t.waitingConsumers[0]
 		t.waitingConsumers[0] = nil
@@ -376,7 +397,7 @@ func (b *Broker) RegisterWebhook(topic, callbackURL string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.webhooks[topic] = append(b.webhooks[topic], callbackURL)
-	log.Printf("Registred Webhook for topic '%s' -> %s\n", topic, callbackURL)
+	log.Printf("Registered Webhook for topic '%s' -> %s\n", topic, callbackURL)
 }
 
 func (b *Broker) CreateTopic(topicName string) error {
@@ -396,6 +417,39 @@ func (b *Broker) CreateTopic(topicName string) error {
 	}
 
 	b.Topics[topicName] = &Topic{Name: topicName}
-	log.Printf("Created Topic '%s' manually vía API/Dashboard\n", topicName)
+	log.Printf("Created Topic '%s' manually via API/Dashboard\n", topicName)
 	return nil
+}
+
+func (b *Broker) Peek(topicName string, limit int) []message.Message {
+	b.mu.RLock()
+	t, exists := b.Topics[topicName]
+	b.mu.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	count := limit
+	if len(t.Messages) < count {
+		count = len(t.Messages)
+	}
+
+	results := make([]message.Message, count)
+	copy(results, t.Messages[:count])
+	return results
+}
+
+func (b *Broker) IsValidTopicName(name string) bool {
+	return validTopicRegex.MatchString(name)
+}
+
+func (b *Broker) TopicExists(name string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	_, exists := b.Topics[name]
+	return exists
 }

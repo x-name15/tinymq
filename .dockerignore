@@ -1,4 +1,4 @@
-# Ignore documentation, README, images, LICENSE, CHANGELOG and examples
+# Ignore documentation and assets
 docs/
 README.md
 images/
@@ -6,10 +6,18 @@ examples/
 LICENSE
 CHANGELOG.md
 
+# Ignore GitHub Actions workflows
+.github/
+
 # Ignore the local data folder to avoid overwriting it
 data/
 
-# Ignore version control and local binaries
+# Ignore version control
 .git/
 .gitignore
+
+# Ignore local binaries and CLI source (Docker only needs the broker)
 bin/
+cmd/tmq/
+tmq
+tmq.exe

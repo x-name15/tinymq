@@ -3,6 +3,28 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.0.0] - 2026-06-18 — The "Featherweight Fortress" Update
+## Added
+...
+- **Interactive Self-Service Dashboard:** The embedded UI now acts as a complete control center. Added interactive modals allowing users to directly **Publish** JSON payloads, **Consume (Pop)** messages to view them, and **Peek** into queues natively from the browser without writing any code.
+- **Queue Inspection API (Peek):** Introduced the `GET /api/queues/peek` endpoint and internal `broker.Peek()` method. This allows administrators to safely inspect up to X messages currently held in RAM without acknowledging or removing them from the queue.
+- **UI API Suite:** Added dedicated JSON endpoints (`/api/queues/publish` and `/api/queues/consume`) specifically designed to serve frontend interactions and external non-standard clients cleanly.
+- **Independent CLI Binary (`cmd/tmq`):** Built a standalone administrative terminal tool (`tmq`). It brings rich terminal diagnostics featuring multi-environment binding (`TINYMQ_URL`), raw RAM inspections (`tmq peek`), real-time queue streaming (`tmq tail`), and tabwriter-aligned telemetry matrices (`tmq list/status`).
+
+## Changed
+
+- **Docker Image:** Migrated to a pure `scratch` base image for the final stage. The production image now weighs a mere **~13 MB**, stripping out all OS-level bloatware and achieving 0 system vulnerabilities (CVEs).
+- **Go SDK (`client/client.go`):** Extensively overhauled to support a single, unified, variadic `Publish` API. Developers can now map advanced routing parameters (`TTL`, `Delay`, `Broadcast`) using fluent `PublishOptions` in a single invocation, drastically cleaning up implementation code.
+- **Dashboard Visuals:** Redesigned the data tables to include a new "Actions" column with dedicated, color-coded buttons for queue management.
+- **CI/CD Pipeline:** Updated the GitHub Actions workflow (`release.yaml`) to compile using Go 1.26, perfectly syncing the build matrix with the `go.mod` specification.
+
+## Security
+
+- **OOM Protection:** Implemented `http.MaxBytesReader` across all publish endpoints (`/publish` and `/api/queues/publish`). Payloads are now strictly capped at 2MB to prevent Out-Of-Memory denial-of-service attacks from unbounded requests.
+- **RAM Backpressure:** Added a hard memory ceiling (`MaxMessagesPerTopic = 100000`). If a queue reaches this limit because workers are offline, the broker will now protect its host environment by returning `HTTP 429 Too Many Requests` instead of infinitely accumulating messages in RAM.
+
+
+---
 ## [1.5.0] - 2026-06-18 — Enterprise Features, Resiliency, and Dashboard Revamp
 
 ## Added

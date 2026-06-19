@@ -40,6 +40,7 @@
         .controls { display: flex; align-items: center; gap: 15px; }
         .refresh-btn { background: #3182ce; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 500; text-decoration: none; font-size: 14px; }
         .refresh-btn:hover { background: #2b6cb0; }
+        
         .toggle-container { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: #4a5568; }
         .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
         .switch input { opacity: 0; width: 0; height: 0; }
@@ -47,6 +48,30 @@
         .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
         input:checked + .slider { background-color: #48bb78; }
         input:checked + .slider:before { transform: translateX(20px); }
+
+        /* Botones de acción en tabla */
+        .row-actions { display: flex; gap: 8px; justify-content: flex-end; }
+        .btn-sm { padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; cursor: pointer; border: 1px solid transparent; }
+        .btn-pub { background: #ebf8ff; color: #3182ce; border-color: #90cdf4; }
+        .btn-pub:hover { background: #bee3f8; }
+        .btn-sub { background: #f0fff4; color: #38a169; border-color: #9ae6b4; }
+        .btn-sub:hover { background: #c6f6d5; }
+        .btn-peek { background: #edf2f7; color: #4a5568; border-color: #cbd5e0; }
+        .btn-peek:hover { background: #e2e8f0; }
+        .peek-msg-card { background: #1a202c; color: #a3e635; padding: 12px; border-radius: 6px; margin-bottom: 10px; font-family: monospace; font-size: 13px; overflow-x: auto; white-space: pre-wrap; }
+
+        /* Modal Styles */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 1000; }
+        .modal { background: white; padding: 24px; border-radius: 8px; width: 100%; max-width: 500px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
+        .modal h2 { margin-top: 0; font-size: 20px; color: #2d3748; }
+        .modal-close { float: right; background: none; border: none; font-size: 20px; cursor: pointer; color: #a0aec0; }
+        .modal-close:hover { color: #4a5568; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 14px; color: #4a5568;}
+        .form-group textarea { width: 100%; height: 120px; padding: 10px; border: 1px solid #cbd5e0; border-radius: 4px; font-family: monospace; box-sizing: border-box; resize: vertical;}
+        .modal-btn { width: 100%; padding: 10px; background: #3182ce; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        .modal-btn:hover { background: #2b6cb0; }
+        .console-output { background: #1a202c; color: #a3e635; padding: 15px; border-radius: 6px; overflow-x: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; max-height: 250px; overflow-y: auto;}
     </style>
 </head>
 <body>
@@ -65,7 +90,7 @@
                     Auto-Refresh
                 </div>
                 <button class="action-btn" onclick="createNewTopic()">
-                    ➕ New Topic
+                    ➕ New Queue/Topic
                 </button>
                 <a href="/dashboard" class="refresh-btn">🔄 Reload</a>
             </div>
@@ -77,7 +102,7 @@
                 <div class="metric-value">{{.Uptime}}</div>
             </div>
             <div class="metric-card blue">
-                <div class="metric-label">Active Topics</div>
+                <div class="metric-label">Active Queues/Topics</div>
                 <div class="metric-value">{{.TotalTopics}}</div>
             </div>
             <div class="metric-card">
@@ -98,9 +123,10 @@
             <table>
                 <thead>
                     <tr>
-                        <th>Topic Name</th>
+                        <th>Queue / Topic Name</th>
                         <th style="text-align: center;">Waiting Consumers</th>
                         <th style="text-align: right;">Messages in RAM</th>
+                        <th style="text-align: right; padding-right: 20px;">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -119,14 +145,52 @@
                             {{end}}
                         </td>
                         <td style="text-align: right;"><span class="msg-count">{{.MessageCount}}</span></td>
+                        <td>
+                            <div class="row-actions">
+                                <button class="btn-sm btn-pub" onclick="openPublishModal('{{.Name}}')">Publish</button>
+                                <button class="btn-sm btn-sub" onclick="consumeMessage('{{.Name}}')">Consume (Pop)</button>
+                                <button class="btn-sm btn-peek" onclick="peekQueue('{{.Name}}')">👁️ Peek</button>
+                            </div>
+                        </td>
                     </tr>
                     {{else}}
                     <tr>
-                        <td colspan="3" class="empty">No topics in memory at this moment.</td>
+                        <td colspan="4" class="empty">No queues in memory at this moment.</td>
                     </tr>
                     {{end}}
                 </tbody>
             </table>
+        </div>
+    </div>
+
+    <div id="publishModal" class="modal-overlay">
+        <div class="modal">
+            <button class="modal-close" onclick="closeModals()">✖</button>
+            <h2>Publish to <span id="pubTargetName" style="color: #3182ce;"></span></h2>
+            <div class="form-group">
+                <label>Payload (JSON format recommended)</label>
+                <textarea id="pubPayload">{"hello": "world", "timestamp": 123456}</textarea>
+            </div>
+            <button class="modal-btn" onclick="submitPublish()">Send Message</button>
+        </div>
+    </div>
+
+    <div id="consumeModal" class="modal-overlay">
+        <div class="modal">
+            <button class="modal-close" onclick="closeModals()">✖</button>
+            <h2>Message Consumed!</h2>
+            <p style="font-size: 14px; color: #718096; margin-top: 0;">Pulled from: <strong id="subTargetName"></strong></p>
+            <div class="console-output" id="consumeOutput">Loading...</div>
+        </div>
+    </div>
+
+    <div id="peekModal" class="modal-overlay">
+        <div class="modal" style="max-width: 600px;">
+            <button class="modal-close" onclick="closeModals()">✖</button>
+            <h2>Messages on RAM</h2>
+            <p style="font-size: 14px; color: #718096; margin-top: 0;">Peeking at: <strong id="peekTargetName"></strong></p>
+            <div id="peekOutput" style="max-height: 350px; overflow-y: auto;">
+                </div>
         </div>
     </div>
 
@@ -135,8 +199,10 @@
         toggle.checked = localStorage.getItem('tinymq_autorefresh') === 'true';
 
         let refreshInterval;
+        let isModalOpen = false;
+
         const manageRefresh = () => {
-            if (toggle.checked) {
+            if (toggle.checked && !isModalOpen) {
                 refreshInterval = setTimeout(() => location.reload(), 3000);
             } else {
                 clearTimeout(refreshInterval);
@@ -150,7 +216,7 @@
         manageRefresh();
 
         async function createNewTopic() {
-            const topicName = prompt("Enter the name of the new Topic (e.g., 'orders.process'):");
+            const topicName = prompt("Enter the name of the new Queue/Topic (e.g., 'orders.process'):");
             if (!topicName || topicName.trim() === "") return;
             const validRegex = /^[a-zA-Z0-9._-]+$/;
             
@@ -166,14 +232,135 @@
                     body: JSON.stringify({ name: topicName.trim() })
                 });
 
-                if (!res.ok) {
-                    const errorText = await res.text();
-                    alert("⚠️ Broker Error: " + errorText);
-                } else {
-                    location.reload();
-                }
+                if (!res.ok) alert("⚠️ Broker Error: " + await res.text());
+                else location.reload();
             } catch (e) {
                 alert("❌ Network Error: The broker could not be reached.");
+            }
+        }
+
+        let currentTargetQueue = "";
+
+        function openPublishModal(queueName) {
+            currentTargetQueue = queueName;
+            document.getElementById('pubTargetName').innerText = queueName;
+            document.getElementById('publishModal').style.display = 'flex';
+            isModalOpen = true; 
+            manageRefresh();
+        }
+
+        function closeModals() {
+            document.getElementById('publishModal').style.display = 'none';
+            document.getElementById('consumeModal').style.display = 'none';
+            document.getElementById('peekModal').style.display = 'none';
+            isModalOpen = false;
+            manageRefresh(); 
+        }
+
+        async function submitPublish() {
+            const payload = document.getElementById('pubPayload').value;
+            if(!payload) return;
+
+            try {
+                const res = await fetch('/api/queues/publish', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ queue: currentTargetQueue, payload: payload })
+                });
+                
+                if(res.ok) {
+                    closeModals();
+                    location.reload(); 
+                } else {
+                    alert("Error publishing message");
+                }
+            } catch(e) {
+                alert("Network error");
+            }
+        }
+
+        async function consumeMessage(queueName) {
+            isModalOpen = true;
+            manageRefresh();
+            
+            document.getElementById('subTargetName').innerText = queueName;
+            const output = document.getElementById('consumeOutput');
+            output.innerText = "Fetching message from broker...";
+            document.getElementById('consumeModal').style.display = 'flex';
+
+            try {
+                const res = await fetch('/api/queues/consume', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ queue: queueName })
+                });
+                
+                if (res.status === 204) {
+                    output.style.color = "#a0aec0";
+                    output.innerText = "// Queue is empty.\n// No pending messages to process.";
+                    return;
+                }
+                
+                const data = await res.json();
+
+                let formattedOutput = `ID: ${data.id}\n`;
+                formattedOutput += `Timestamp: ${new Date(data.timestamp).toLocaleString()}\n`;
+            
+                try {
+                    const parsedPayload = JSON.parse(atob(data.payload)); 
+                    formattedOutput += `\nPayload (JSON):\n${JSON.stringify(parsedPayload, null, 2)}`;
+                } catch(e) {
+                    formattedOutput += `\nPayload (Raw):\n${data.payload || atob(data.payload || '')}`;
+                }
+
+                output.style.color = "#a3e635";
+                output.innerText = formattedOutput;
+                
+            } catch(e) {
+                output.style.color = "#e53e3e";
+                output.innerText = "Error trying to consume from the broker.\n" + e;
+            }
+        }
+
+        async function peekQueue(queueName) {
+            isModalOpen = true;
+            manageRefresh(); 
+            
+            document.getElementById('peekTargetName').innerText = queueName;
+            const output = document.getElementById('peekOutput');
+            output.innerHTML = "<p>Checking with the Broker...</p>";
+            document.getElementById('peekModal').style.display = 'flex';
+
+            try {
+                const res = await fetch(`/api/queues/peek?queue=${encodeURIComponent(queueName)}`);
+                const messages = await res.json();
+                
+                if (!messages || messages.length === 0) {
+                    output.innerHTML = "<div class='peek-msg-card' style='color: #a0aec0;'>// The queue/topic is completely empty.</div>";
+                    return;
+                }
+                
+                let html = "";
+                messages.forEach((msg, index) => {
+                    let rawStr = atob(msg.payload);
+                    let displayPayload = rawStr;
+
+                    try {
+                        displayPayload = JSON.stringify(JSON.parse(rawStr), null, 2);
+                    } catch(e) {}
+
+                    html += `
+                    <div class="peek-msg-card">
+                        <span style="color:#4db8ff; font-weight:bold;">#${index + 1} | ID: ${msg.id}</span>
+                        <hr style="border-color: #2d3748; margin: 8px 0;">
+                        ${displayPayload}
+                    </div>`;
+                });
+                
+                output.innerHTML = html;
+                
+            } catch(e) {
+                output.innerHTML = `<div class='peek-msg-card' style='color: #e53e3e;'>Network error trying to peek at the queue/topic.</div>`;
             }
         }
     </script>

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"tinymq/internal/message"
+	"github.com/x-name15/tinymq/internal/message"
 )
 
 const (
