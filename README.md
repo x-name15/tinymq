@@ -96,4 +96,4 @@ If you find bugs or want to improve TinyMQ then:
 3. Open a PR
 
 ### Credits
-**Author:** Mr Jacket 
+**Author:** Mr Jacket / Felix Manrique
