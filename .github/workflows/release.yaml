@@ -53,29 +53,42 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md cmd/tinymq/version.go
-          git diff --staged --quiet || git commit -m "chore: actualizar versión a v${VERSION}"
+          git diff --staged --quiet || git commit -m "chore: update version to v${VERSION}"
           git push
           git tag "v${VERSION}" || true
           git push origin "v${VERSION}" || true
 
-      - name: Build Binaries & Package Source
+      - name: Build Binaries & Package Bundles
         run: |
           mkdir dist
+          VERSION="${{ steps.version.outputs.version }}"
 
-          # tinymq (server)
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-windows-amd64.exe ./cmd/tinymq
-          GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-linux-amd64       ./cmd/tinymq
-          GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/tinymq-darwin-amd64      ./cmd/tinymq
-          GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/tinymq-darwin-arm64      ./cmd/tinymq
+          # Windows (Zip Bundle)
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o tinymq.exe ./cmd/tinymq
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o tmq.exe ./cmd/tmq
+          zip -q dist/tinymq-${VERSION}-windows-amd64.zip tinymq.exe tmq.exe
+          rm tinymq.exe tmq.exe
 
-          # tmq (CLI)
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/tmq-windows-amd64.exe ./cmd/tmq
-          GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/tmq-linux-amd64       ./cmd/tmq
-          GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/tmq-darwin-amd64      ./cmd/tmq
-          GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/tmq-darwin-arm64      ./cmd/tmq
+          # Linux AMD64 (Tar.gz Bundle)
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+          tar -czf dist/tinymq-${VERSION}-linux-amd64.tar.gz tinymq tmq
+          rm tinymq tmq
 
-          # Crear un ZIP limpio con el código fuente para la release
-          git archive --format=zip -o dist/tinymq-source-${{ steps.version.outputs.version }}.zip HEAD
+          # macOS Intel (Tar.gz Bundle)
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+          tar -czf dist/tinymq-${VERSION}-darwin-amd64.tar.gz tinymq tmq
+          rm tinymq tmq
+
+          # macOS Apple Silicon (Tar.gz Bundle)
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+          tar -czf dist/tinymq-${VERSION}-darwin-arm64.tar.gz tinymq tmq
+          rm tinymq tmq
+
+          # Source Code Zip
+          git archive --format=zip -o dist/tinymq-source-${VERSION}.zip HEAD
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -86,28 +99,21 @@ jobs:
             ${{ steps.notes.outputs.notes }}
             
             ---
-            ## 📦 Downloads
+            ## 📦 Downloads (Broker Server + CLI Bundle)
             
-            | Operating System | Broker Server | CLI Tool (`tmq`) |
-            |-------------------|---------------|------------------|
-            | **Windows (x64)** | `tinymq-windows-amd64.exe` | `tmq-windows-amd64.exe` |
-            | **Linux (x64)** | `tinymq-linux-amd64` | `tmq-linux-amd64` |
-            | **macOS (Intel)** | `tinymq-darwin-amd64` | `tmq-darwin-amd64` |
-            | **macOS (Apple Silicon)** | `tinymq-darwin-arm64` | `tmq-darwin-arm64` |
+            | Operating System | Download Archive |
+            |-------------------|------------------|
+            | **Windows (x64)** | `tinymq-${{ steps.version.outputs.version }}-windows-amd64.zip` |
+            | **Linux (x64)** | `tinymq-${{ steps.version.outputs.version }}-linux-amd64.tar.gz` |
+            | **macOS (Intel)** | `tinymq-${{ steps.version.outputs.version }}-darwin-amd64.tar.gz` |
+            | **macOS (Apple Silicon)** | `tinymq-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz` |
             
-            **Docker Image:** `docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}`
+            **Docker Images:**
+            - **GHCR:** `docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}`
+            - **Docker Hub:** `docker pull flez71/tinymq:${{ steps.version.outputs.version }}`
             
             View [Full CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
-          files: |
-            dist/tinymq-windows-amd64.exe
-            dist/tinymq-linux-amd64
-            dist/tinymq-darwin-amd64
-            dist/tinymq-darwin-arm64
-            dist/tmq-windows-amd64.exe
-            dist/tmq-linux-amd64
-            dist/tmq-darwin-amd64
-            dist/tmq-darwin-arm64
-            dist/tinymq-source-${{ steps.version.outputs.version }}.zip
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

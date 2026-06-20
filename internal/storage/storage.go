@@ -28,15 +28,17 @@ type DiskStorage struct {
 	mu          sync.Mutex
 	dataDir     string
 	activeFiles map[string]*os.File
+	syncWrites  bool
 }
 
-func New(dataDir string) (*DiskStorage, error) {
+func New(dataDir string, syncWrites bool) (*DiskStorage, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 	return &DiskStorage{
 		dataDir:     dataDir,
 		activeFiles: make(map[string]*os.File),
+		syncWrites:  syncWrites,
 	}, nil
 }
 
@@ -61,6 +63,11 @@ func (s *DiskStorage) writeRecord(topic string, record LogRecord) error {
 	}
 
 	_, err = file.Write(append(bytes, '\n'))
+
+	if s.syncWrites && err == nil {
+		err = file.Sync()
+	}
+
 	return err
 }
 
@@ -144,7 +151,7 @@ func (s *DiskStorage) CompactLog(topic string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	msgMap := make(map[string]LogRecord)
 	var orderedIDs []string
 
@@ -165,12 +172,12 @@ func (s *DiskStorage) CompactLog(topic string) error {
 			delete(msgMap, rec.MessageID)
 		}
 	}
-	
+
 	if err := scanner.Err(); err != nil {
 		file.Close()
 		return fmt.Errorf("error scanning log file during compaction: %w", err)
 	}
-	file.Close() 
+	file.Close()
 
 	tmpFilename := filename + ".tmp"
 	tmpFile, err := os.OpenFile(tmpFilename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
@@ -219,7 +226,7 @@ func (s *DiskStorage) ClearLog(topic string) error {
 	if file, exists := s.activeFiles[topic]; exists {
 		file.Close()
 	}
-	
+
 	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topic))
 	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err == nil {
@@ -236,11 +243,11 @@ func (s *DiskStorage) DeleteLog(topic string) error {
 		file.Close()
 		delete(s.activeFiles, topic)
 	}
-	
+
 	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topic))
 	err := os.Remove(filename)
 	if os.IsNotExist(err) {
-		return nil 
+		return nil
 	}
 	return err
 }

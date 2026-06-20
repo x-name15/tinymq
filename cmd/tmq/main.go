@@ -1,15 +1,21 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"strings"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"text/tabwriter"
 	"time"
 )
@@ -68,6 +74,10 @@ func main() {
 		handlePeek(baseURL, os.Args[2:])
 	case "tail":
 		handleTail(baseURL, os.Args[2:])
+	case "bench":
+		handleBench(baseURL, os.Args[2:])
+	case "backup":
+		handleBackup(os.Args[2:])
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -303,6 +313,195 @@ func handleTail(baseURL string, args []string) {
 	}
 }
 
+func handleBench(baseURL string, args []string) {
+	benchCmd := flag.NewFlagSet("bench", flag.ExitOnError)
+	total := benchCmd.Int("total", 20000, "Total messages to publish")
+	concurrency := benchCmd.Int("concurrency", 50, "Number of concurrent workers")
+
+	benchCmd.Parse(args)
+	leftover := benchCmd.Args()
+
+	if len(leftover) < 1 {
+		fmt.Println("Usage: tmq bench <topic> [--total=20000] [--concurrency=50]")
+		return
+	}
+	topic := leftover[0]
+
+	fmt.Printf("Starting TinyMQ Benchmark...\n")
+	fmt.Printf("Target: %s/publish/%s\n", baseURL, topic)
+	fmt.Printf("Messages: %d | Concurrency: %d\n\n", *total, *concurrency)
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	payload := []byte(`{"event":"bench","data":"stress_test_payload_123456789"}`)
+	
+	var successCount int32
+	var failCount int32
+	var wg sync.WaitGroup
+
+	jobs := make(chan int, *total)
+	start := time.Now()
+
+	for w := 1; w <= *concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range jobs {
+				url := fmt.Sprintf("%s/publish/%s", baseURL, topic)
+				req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payload))
+				req.Header.Set("Content-Type", "application/json")
+
+				resp, err := client.Do(req)
+				if err != nil {
+					atomic.AddInt32(&failCount, 1)
+					continue
+				}
+				
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+
+				if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK {
+					atomic.AddInt32(&successCount, 1)
+				} else {
+					atomic.AddInt32(&failCount, 1)
+				}
+			}
+		}()
+	}
+
+	for j := 1; j <= *total; j++ {
+		jobs <- j
+	}
+	close(jobs)
+	wg.Wait()
+	
+	duration := time.Since(start)
+	msgsPerSec := float64(successCount) / duration.Seconds()
+
+	fmt.Printf("📊 --- BENCHMARK RESULTS ---\n")
+	fmt.Printf("Time Taken:       %.2f seconds\n", duration.Seconds())
+	fmt.Printf("Successful:       %d\n", successCount)
+	fmt.Printf("Failed:           %d\n", failCount)
+	fmt.Printf("Throughput:       \033[32m\033[1m%.2f msgs/sec\033[0m\n", msgsPerSec)
+}
+
+func handleBackup(args []string) {
+	backupCmd := flag.NewFlagSet("backup", flag.ExitOnError)
+	format := backupCmd.String("format", "zip", "Backup format: 'zip' or 'tar'")
+
+	backupCmd.Parse(args)
+	dataDir := "./data"
+
+	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+		fmt.Printf("%s[Error] Cannot find './data' directory.%s\n", colorRed, colorReset)
+		return
+	}
+
+	if *format == "tar" {
+		outName := fmt.Sprintf("tinymq_backup_%d.tar.gz", time.Now().Unix())
+		createTarGzBackup(dataDir, outName)
+	} else {
+		outName := fmt.Sprintf("tinymq_backup_%d.zip", time.Now().Unix())
+		createZipBackup(dataDir, outName)
+	}
+}
+
+func createZipBackup(dataDir string, outZip string) {
+	fmt.Printf("Backing up TinyMQ data to '%s' (Format: ZIP)...\n", outZip)
+
+	outFile, err := os.Create(outZip)
+	if err != nil {
+		fmt.Printf("❌ Error creating zip file: %v\n", err)
+		return
+	}
+	defer outFile.Close()
+
+	w := zip.NewWriter(outFile)
+	defer w.Close()
+
+	filesAdded := 0
+	filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || filepath.Ext(path) != ".log" {
+			return nil
+		}
+
+		relPath, _ := filepath.Rel(dataDir, path)
+		f, err := w.Create(relPath)
+		if err != nil {
+			return err
+		}
+
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+
+		if _, err = io.Copy(f, src); err == nil {
+			filesAdded++
+		}
+		return nil
+	})
+
+	fmt.Printf("✅ Backup complete! %d topic logs compressed securely.\n", filesAdded)
+}
+
+func createTarGzBackup(dataDir string, outTar string) {
+	fmt.Printf("Backing up TinyMQ data to '%s' (Format: TAR.GZ)...\n", outTar)
+
+	outFile, err := os.Create(outTar)
+	if err != nil {
+		fmt.Printf("❌ Error creating tar file: %v\n", err)
+		return
+	}
+	defer outFile.Close()
+
+	gw := gzip.NewWriter(outFile)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	filesAdded := 0
+	filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || filepath.Ext(path) != ".log" {
+			return nil
+		}
+
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+
+		header, err := tar.FileInfoHeader(info, info.Name())
+		if err != nil {
+			return err
+		}
+		
+		relPath, _ := filepath.Rel(dataDir, path)
+		header.Name = relPath
+
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if _, err = io.Copy(tw, src); err == nil {
+			filesAdded++
+		}
+		return nil
+	})
+
+	fmt.Printf("✅ Backup complete! %d topic logs compressed securely.\n", filesAdded)
+}
+
 func parseMessagesPayload(body []byte) ([]CLIMessage, error) {
 	var list []CLIMessage
 	if err := json.Unmarshal(body, &list); err == nil {
@@ -328,6 +527,8 @@ func printHelp() {
 	fmt.Println("  sub <queue>           Consumes/extracts messages from the queue (supports --timeout, --limit).")
 	fmt.Println("  peek <queue>          Inspects messages in RAM without deleting them.")
 	fmt.Println("  tail <queue>          Live streaming mode (prints messages in real-time).")
+	fmt.Println("  bench <queue>         Runs a stress test (flags: --total, --concurrency).")
+	fmt.Println("  backup                Compresses the ./data folder (flags: --format=zip|tar).")
 	fmt.Println("\nEnvironment variables:")
 	fmt.Println("  TINYMQ_URL            Broker URL (Default: http://localhost:7800)")
 	fmt.Println()

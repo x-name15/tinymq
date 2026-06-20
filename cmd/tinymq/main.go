@@ -2,25 +2,26 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
-	"time"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
-	"syscall"
-	"embed"
-	"html/template"
 	"runtime"
 	"strconv"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/x-name15/tinymq/internal/broker"
-	"github.com/x-name15/tinymq/internal/storage"
+	"github.com/x-name15/tinymq/internal/helper"
 	"github.com/x-name15/tinymq/internal/message"
+	"github.com/x-name15/tinymq/internal/storage"
 )
 
 type Server struct {
@@ -76,6 +77,15 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 			del := time.Now().Add(duration)
 			deliverAt = &del
 		}
+	}
+
+	iKey := r.Header.Get("Idempotency-Key")
+	if iKey != "" && s.broker.IsIdempotent(iKey) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fmt.Sprintf(`{"status": "ignored", "reason": "idempotency_key_exists", "topic": "%s"}`, topic)))
+		log.Printf("Ignored duplicate message on topic: %s (Key: %s)\n", topic, iKey)
+		return
 	}
 
 	isBroadcast := r.URL.Query().Get("broadcast") == "true"
@@ -464,12 +474,87 @@ func (s *Server) handleGetWebhooks(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(urls)
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	stats, totalWebhooks := s.broker.GetStats()
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	
+	fmt.Fprintf(w, "# HELP tinymq_topics_total Total Queue/Topics active on Memory\n")
+	fmt.Fprintf(w, "# TYPE tinymq_topics_total gauge\n")
+	fmt.Fprintf(w, "tinymq_topics_total %d\n\n", len(stats))
+	
+	fmt.Fprintf(w, "# HELP tinymq_webhooks_total Subscribed URLs\n")
+	fmt.Fprintf(w, "# TYPE tinymq_webhooks_total gauge\n")
+	fmt.Fprintf(w, "tinymq_webhooks_total %d\n\n", totalWebhooks)
+
+	if len(stats) > 0 {
+		fmt.Fprintf(w, "# HELP tinymq_topic_messages Messages held in RAM\n")
+		fmt.Fprintf(w, "# TYPE tinymq_topic_messages gauge\n")
+		for _, st := range stats {
+			fmt.Fprintf(w, "tinymq_topic_messages{topic=\"%s\"} %d\n", st.Name, st.MessageCount)
+		}
+		fmt.Fprintf(w, "\n")
+
+		fmt.Fprintf(w, "# HELP tinymq_topic_consumers Consumers waiting in Long-Polling\n")
+		fmt.Fprintf(w, "# TYPE tinymq_topic_consumers gauge\n")
+		for _, st := range stats {
+			fmt.Fprintf(w, "tinymq_topic_consumers{topic=\"%s\"} %d\n", st.Name, st.WaitingConsumers)
+		}
+	}
+}
+
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 3 || parts[2] == "" {
+		http.Error(w, "Topic is required. Usage: GET /stream/{topic}", http.StatusBadRequest)
+		return
+	}
+	topic := parts[2]
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	spyChan := s.broker.AddSpy(topic)
+	
+	ctx := r.Context()
+	defer s.broker.RemoveSpy(topic, spyChan)
+
+	fmt.Fprintf(w, "data: {\"status\":\"connected\",\"topic\":\"%s\"}\n\n", topic)
+	flusher.Flush()
+	log.Printf("[SSE] Client connected to live stream of '%s'\n", topic)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[SSE] Client disconnected from '%s'\n", topic)
+			return
+		case msg := <-spyChan:
+			bytes, _ := json.Marshal(msg)
+			fmt.Fprintf(w, "data: %s\n\n", string(bytes))
+			flusher.Flush()
+		}
+	}
+}
 
 func main() {
+	helper.LoadEnv()
+
 	log.Printf("Starting TinyMQ v%s...\n", Version)
 
 	dataDir := "./data"
-	store, err := storage.New(dataDir)
+	syncWrites := os.Getenv("TINYMQ_FSYNC") == "true"
+	if syncWrites {
+		log.Println("Strict disk durability (FSync) is ENABLED.")
+	}
+
+	store, err := storage.New(dataDir, syncWrites)
 	if err != nil {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
@@ -499,6 +584,39 @@ func main() {
 		}
 	}
 
+	ctx, cancelGC := context.WithCancel(context.Background())
+	defer cancelGC()
+
+	go func() {
+		compactionInterval := 10 * time.Minute
+		if envInt := os.Getenv("TINYMQ_COMPACT_INTERVAL"); envInt != "" {
+			if d, err := time.ParseDuration(envInt); err == nil {
+				compactionInterval = d
+			}
+		}
+		
+		ticker := time.NewTicker(compactionInterval)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				stats, _ := b.GetStats()
+				compacted := 0
+				for _, st := range stats {
+					if err := store.CompactLog(st.Name); err == nil {
+						compacted++
+					}
+				}
+				if compacted > 0 {
+					log.Printf("[GC] Auto-compacted %d WAL files to free disk space.\n", compacted)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	srv := &Server{broker: b}
 
 	mux := http.NewServeMux()
@@ -508,7 +626,9 @@ func main() {
 	mux.HandleFunc("/requeue", srv.handleRequeue)
 	mux.HandleFunc("/webhook/", srv.handleRegisterWebhook)
 	mux.HandleFunc("/api/topics", srv.handleCreateTopic)
+	mux.HandleFunc("/stream/", srv.handleStream)
 	mux.HandleFunc("/dashboard", srv.handleDashboard)
+	mux.HandleFunc("/metrics", srv.handleMetrics)
 
 	mux.HandleFunc("/api/queues", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -559,10 +679,10 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down TinyMQ gracefully...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
 
-	if err := httpServer.Shutdown(ctx); err != nil {
+	if err := httpServer.Shutdown(ctxShutdown); err != nil {
 		log.Fatalf("Forced shutdown: %v", err)
 	}
 

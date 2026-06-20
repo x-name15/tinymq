@@ -18,17 +18,19 @@ import (
 type Topic struct {
 	Name             string
 	Messages         []message.Message
-	mu               sync.Mutex
 	waitingConsumers []chan message.Message
+	spies            []chan message.Message
+	mu               sync.Mutex
 }
 
 type Broker struct {
-	mu            sync.RWMutex
-	Topics        map[string]*Topic
-	storage       *storage.DiskStorage
-	compiledRegex map[string]*regexp.Regexp
-	webhooks      map[string][]string
-	webhookClient *http.Client
+	mu            	sync.RWMutex
+	Topics        	map[string]*Topic
+	storage       	*storage.DiskStorage
+	compiledRegex 	map[string]*regexp.Regexp
+	webhooks      	map[string][]string
+	webhookClient 	*http.Client
+	idempotencyKeys map[string]time.Time
 }
 
 type TopicStat struct {
@@ -45,11 +47,12 @@ var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 func New(store *storage.DiskStorage) *Broker {
 	return &Broker{
-		Topics:        make(map[string]*Topic),
-		storage:       store,
-		compiledRegex: make(map[string]*regexp.Regexp),
-		webhooks:      make(map[string][]string),
-		webhookClient: &http.Client{Timeout: 10 * time.Second},
+		Topics:          make(map[string]*Topic),
+		storage:         store,
+		compiledRegex:   make(map[string]*regexp.Regexp),
+		webhooks:      	 make(map[string][]string),
+		webhookClient: 	 &http.Client{Timeout: 10 * time.Second},
+		idempotencyKeys: make(map[string]time.Time),
 	}
 }
 
@@ -189,6 +192,14 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 	}
 
 	t.Messages = append(t.Messages, msg)
+
+	for _, spy := range t.spies {
+		select {
+		case spy <- msg:
+		default:
+		}
+	}
+	
 	return nil
 }
 
@@ -504,4 +515,70 @@ func (b *Broker) GetWebhooks(topicName string) []string {
 	result := make([]string, len(urls))
 	copy(result, urls)
 	return result
+}
+
+func (b *Broker) IsIdempotent(key string) bool {
+	if key == "" {
+		return false
+	}
+	
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	
+	now := time.Now()
+	
+	if exp, exists := b.idempotencyKeys[key]; exists {
+		if now.Before(exp) {
+			return true 
+		}
+	}
+	
+	b.idempotencyKeys[key] = now.Add(5 * time.Minute)
+	
+	if len(b.idempotencyKeys) > 5000 {
+		for k, v := range b.idempotencyKeys {
+			if now.After(v) {
+				delete(b.idempotencyKeys, k)
+			}
+		}
+	}
+	
+	return false
+}
+
+func (b *Broker) AddSpy(topicName string) chan message.Message {
+	b.mu.Lock()
+	t, exists := b.Topics[topicName]
+	if !exists {
+		t = &Topic{Name: topicName}
+		b.Topics[topicName] = t
+	}
+	b.mu.Unlock()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	
+	ch := make(chan message.Message, 50)
+	t.spies = append(t.spies, ch)
+	return ch
+}
+
+func (b *Broker) RemoveSpy(topicName string, ch chan message.Message) {
+	b.mu.Lock()
+	t, exists := b.Topics[topicName]
+	b.mu.Unlock()
+
+	if !exists {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i, spy := range t.spies {
+		if spy == ch {
+			t.spies = append(t.spies[:i], t.spies[i+1:]...)
+			close(ch)
+			break
+		}
+	}
 }

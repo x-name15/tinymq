@@ -3,6 +3,21 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+---
+## [2.2.0] - 2026-06-20 — Observability, CLI - Backups, Streaming  & Resilience Update
+
+## Added
+- **Native Prometheus Metrics:** Introduced a `/metrics` endpoint that outputs broker statistics (active topics, RAM messages, webhooks, and waiting consumers) in plain text formatted specifically for Prometheus scraping. Achieved with 0 external dependencies.
+- **Network Idempotency:** Added support for the `Idempotency-Key` HTTP header in the `/publish` endpoint. The broker now caches keys for 5 minutes, safely ignoring duplicate requests caused by network retries (returning HTTP 200 OK with an `ignored` status) without duplicating payloads.
+- **CLI Expansion (Bench & Backup):** Added `tmq bench` to run high-concurrency stress tests directly against the broker respecting the `TINYMQ_URL` binding. Added `tmq backup` with `--format=zip|tar` flags to safely compress active WAL (`.log`) files for easy state migrations.
+- **Background Garbage Collector (Auto-Compaction):** Introduced a silent background routine that automatically compacts Write-Ahead Log (`.log`) files to prevent infinite disk growth on long-running servers. Configurable via `TINYMQ_COMPACT_INTERVAL` (default: 10m).
+- **Strict Disk Durability (FSync):** Added the `TINYMQ_FSYNC` environment variable. When set to `true`, the broker forces the host's physical disk to flush buffers and sync after every single message operation, providing bank-grade durability at the cost of raw throughput.
+- **Server-Sent Events (SSE):** Introduced the `GET /stream/{topic}` endpoint. Clients can now open a persistent HTTP connection to receive a real-time stream of messages as they are published to a topic, utilizing standard HTTP/1.1 chunked transfer encoding.
+- **Broker Spy Mode:** The internal engine now supports non-destructive listeners. Connecting to the SSE stream allows administrators to monitor live traffic without "stealing" payloads from actual consumer workers, as messages remain safely in the queue for processing.
+- **Native `.env` Loader:** Added a zero-dependency helper (`internal/helper/env.go`) that automatically parses local `.env` files if present, streamlining local development and Docker Compose environments.
+
+## Fixed
+- **Docker Compose Volume Path:** Corrected the volume mapping in `docker-compose.yml` from `/app/data` to `/root/data` to properly match the `scratch` base image `WORKDIR`.
 
 ---
 ## [2.1.0] - 2026-06-19 — Expand Dashboard Functionality

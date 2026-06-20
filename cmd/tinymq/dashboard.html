@@ -40,7 +40,7 @@
         }
 
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-color); color: var(--text-color); margin: 0; padding: 40px; transition: background 0.3s; }
-        .container { max-width: 1100px; margin: 0 auto; }
+        .container { max-width: 1150px; margin: 0 auto; }
         .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 30px; border-bottom: 2px solid var(--border-color); padding-bottom: 20px; }
         h1 { margin: 0; color: var(--heading-color); font-size: 28px; }
         
@@ -96,10 +96,12 @@
         .btn-sub:hover { background: #c6f6d5; }
         .btn-peek { background: #edf2f7; color: #4a5568; border-color: #cbd5e0; }
         .btn-peek:hover { background: #e2e8f0; }
+        .btn-tail { background: #faf5ff; color: #805ad5; border-color: #d6bcfa; }
+        .btn-tail:hover { background: #e9d8fd; }
         .btn-danger { background: #fff5f5; color: #e53e3e; border-color: #feb2b2; }
         .btn-danger:hover { background: #fed7d7; }
         
-        .peek-msg-card { background: var(--console-bg); color: var(--console-text); padding: 12px; border-radius: 6px; margin-bottom: 10px; font-family: monospace; font-size: 13px; overflow-x: auto; white-space: pre-wrap; position: relative; }
+        .peek-msg-card { background: var(--console-bg); color: var(--console-text); padding: 12px; border-radius: 6px; margin-bottom: 10px; font-family: monospace; font-size: 13px; overflow-x: auto; white-space: pre-wrap; position: relative; border-left: 3px solid #805ad5; }
         .copy-btn { position: absolute; top: 8px; right: 8px; background: rgba(255,255,255,0.2); border: none; color: white; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
         .copy-btn:hover { background: rgba(255,255,255,0.4); }
 
@@ -115,6 +117,10 @@
         .modal-btn { width: 100%; padding: 10px; background: #3182ce; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 10px; }
         .modal-btn:hover { background: #2b6cb0; }
         .console-output { background: var(--console-bg); color: var(--console-text); padding: 15px; border-radius: 6px; overflow-x: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; max-height: 250px; overflow-y: auto; position: relative;}
+
+        .live-tail-box { background: #000; color: #0f0; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 13px; height: 350px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+        .tail-msg { border-bottom: 1px solid #333; padding-bottom: 8px; word-break: break-all; }
+        .tail-timestamp { color: #888; font-size: 11px; }
 
         #toast { visibility: hidden; min-width: 250px; background-color: #333; color: #fff; text-align: center; border-radius: 6px; padding: 12px; position: fixed; z-index: 2000; right: 30px; bottom: 30px; font-size: 14px; font-weight: bold; box-shadow: 0px 4px 10px rgba(0,0,0,0.3); }
         #toast.show { visibility: visible; animation: fadein 0.5s, fadeout 0.5s 2.5s; }
@@ -217,10 +223,11 @@
                             <div class="row-actions">
                                 <button class="btn-sm btn-pub" onclick="openPublishModal('{{.Name}}')" title="Publish Message">Pub</button>
                                 <button class="btn-sm btn-sub" onclick="consumeMessage('{{.Name}}')" title="Consume Message">Sub</button>
-                                <button class="btn-sm btn-peek" onclick="peekQueue('{{.Name}}')" title="Peek RAM"></button>
+                                <button class="btn-sm btn-peek" onclick="peekQueue('{{.Name}}')" title="Peek RAM">Peek</button>
+                                <button class="btn-sm btn-tail" onclick="openTailModal('{{.Name}}')" title="Live Stream (SSE)">⚡ Tail</button>
                                 <div style="border-left: 1px solid var(--border-light); height: 16px; margin: 0 4px;"></div>
                                 <button class="btn-sm btn-danger" onclick="purgeQueue('{{.Name}}')" title="Purge Queue">Purge</button>
-                                <button class="btn-sm btn-danger" onclick="deleteQueue('{{.Name}}')" title="Delete Queue"></button>
+                                <button class="btn-sm btn-danger" onclick="deleteQueue('{{.Name}}')" title="Delete Queue">❌</button>
                             </div>
                         </td>
                     </tr>
@@ -234,6 +241,7 @@
         </div>
     </div>
 
+    <!-- Modals -->
     <div id="publishModal" class="modal-overlay">
         <div class="modal">
             <button class="modal-close" onclick="closeModals()">✖</button>
@@ -304,6 +312,16 @@
         </div>
     </div>
 
+    <div id="tailModal" class="modal-overlay">
+        <div class="modal" style="max-width: 700px;">
+            <button class="modal-close" onclick="closeModals()">✖</button>
+            <h2>⚡ Live Stream (SSE)</h2>
+            <p style="font-size: 14px; color: var(--muted-color); margin-top: 0;">Spying on: <strong id="tailTargetName"></strong>. <span style="color: #48bb78;">Connected & waiting...</span></p>
+            <div class="live-tail-box" id="tailOutput">
+            </div>
+        </div>
+    </div>
+
     <script>
         const themeToggle = document.getElementById('themeToggle');
         if(localStorage.getItem('tinymq_theme') === 'dark') {
@@ -324,6 +342,7 @@
         toggle.checked = localStorage.getItem('tinymq_autorefresh') === 'true';
         let refreshInterval;
         let isModalOpen = false;
+        let currentEventSource = null;
 
         const manageRefresh = () => {
             if (toggle.checked && !isModalOpen) {
@@ -338,7 +357,6 @@
         });
         manageRefresh();
 
-        // --- Utils ---
         function showToast(msg, isError = false) {
             const toast = document.getElementById("toast");
             toast.innerText = msg;
@@ -368,6 +386,12 @@
         function closeModals() {
             document.querySelectorAll('.modal-overlay').forEach(el => el.style.display = 'none');
             isModalOpen = false;
+            
+            if (currentEventSource) {
+                currentEventSource.close();
+                currentEventSource = null;
+            }
+            
             manageRefresh(); 
         }
 
@@ -515,6 +539,44 @@
             } catch(e) { output.innerHTML = `<div class='peek-msg-card' style='color: #e53e3e;'>Network error trying to peek.</div>`; }
         }
 
+        function openTailModal(queueName) {
+            isModalOpen = true; manageRefresh(); 
+            document.getElementById('tailTargetName').innerText = queueName;
+            const output = document.getElementById('tailOutput');
+            output.innerHTML = ""; 
+            
+            document.getElementById('tailModal').style.display = 'flex';
+
+            currentEventSource = new EventSource(`/stream/${encodeURIComponent(queueName)}`);
+            
+            currentEventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (data.status === "connected") return;
+                let displayPayload = "";
+                try {
+                    let rawStr = atob(data.payload);
+                    try { displayPayload = JSON.stringify(JSON.parse(rawStr)); } 
+                    catch(e) { displayPayload = rawStr; }
+                } catch(e) { displayPayload = data.payload; }
+
+                const timeStr = new Date(data.timestamp).toLocaleTimeString();
+                
+                const msgHtml = `
+                    <div class="tail-msg">
+                        <div class="tail-timestamp">[${timeStr}] ID: ${data.id.split('-')[0]}...</div>
+                        <div style="color: #fff;">${displayPayload}</div>
+                    </div>
+                `;
+                
+                output.innerHTML += msgHtml;
+                output.scrollTop = output.scrollHeight;
+            };
+
+            currentEventSource.onerror = function() {
+                output.innerHTML += `<div class="tail-msg" style="color: #f00;">// Connection lost. Retrying...</div>`;
+            };
+        }
+
         async function openWebhookModal(queueName) {
             currentTargetQueue = queueName;
             document.getElementById('whTargetName').innerText = queueName;
@@ -531,7 +593,7 @@
                 if(urls.length === 0) {
                     whList.innerHTML = "<div class='wh-item' style='color: var(--muted-color); text-align:center;'>No webhooks registered yet.</div>";
                 } else {
-                    whList.innerHTML = urls.map(url => `<div class='wh-item'> ${url}</div>`).join('');
+                    whList.innerHTML = urls.map(url => `<div class='wh-item'>📡 ${url}</div>`).join('');
                 }
             } catch(e) { whList.innerHTML = "<p style='color: #e53e3e;'>Error loading webhooks</p>"; }
         }
