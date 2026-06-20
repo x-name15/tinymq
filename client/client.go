@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,13 +18,13 @@ type Client struct {
 }
 
 type PublishOptions struct {
-	TTL       time.Duration 
-	Delay     time.Duration 
-	Broadcast bool          
+	TTL       time.Duration
+	Delay     time.Duration
+	Broadcast bool
 }
 
 type SubscriptionOptions struct {
-	Timeout string 
+	Timeout string
 }
 
 type MessageHandler func(msg message.Message) error
@@ -32,11 +33,10 @@ func NewClient(baseURL string) *Client {
 	return &Client{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 35 * time.Second, 
+			Timeout: 35 * time.Second,
 		},
 	}
 }
-
 
 func (c *Client) Publish(topic string, payload []byte, opts ...PublishOptions) error {
 	params := url.Values{}
@@ -54,11 +54,12 @@ func (c *Client) Publish(topic string, payload []byte, opts ...PublishOptions) e
 		}
 	}
 
+	safeTopic := url.PathEscape(topic)
 	var u string
 	if len(params) > 0 {
-		u = fmt.Sprintf("%s/publish/%s?%s", c.baseURL, topic, params.Encode())
+		u = fmt.Sprintf("%s/publish/%s?%s", c.baseURL, safeTopic, params.Encode())
 	} else {
-		u = fmt.Sprintf("%s/publish/%s", c.baseURL, topic)
+		u = fmt.Sprintf("%s/publish/%s", c.baseURL, safeTopic)
 	}
 
 	resp, err := c.httpClient.Post(u, "application/json", bytes.NewBuffer(payload))
@@ -73,15 +74,14 @@ func (c *Client) Publish(topic string, payload []byte, opts ...PublishOptions) e
 	return nil
 }
 
-
 func (c *Client) PublishBroadcast(topic string, payload []byte) error {
 	return c.Publish(topic, payload, PublishOptions{Broadcast: true})
 }
 
-func (c *Client) Subscribe(topic string, options SubscriptionOptions, handler MessageHandler) {
+func (c *Client) Subscribe(ctx context.Context, topic string, options SubscriptionOptions, handler MessageHandler) {
 	params := url.Values{}
-	params.Add("auto_ack", "false") 
-	params.Add("limit", "1")        
+	params.Add("auto_ack", "false")
+	params.Add("limit", "1")
 
 	if options.Timeout != "" {
 		params.Add("timeout", options.Timeout)
@@ -89,32 +89,42 @@ func (c *Client) Subscribe(topic string, options SubscriptionOptions, handler Me
 		params.Add("timeout", "5s")
 	}
 
-	u := fmt.Sprintf("%s/consume/%s?%s", c.baseURL, topic, params.Encode())
+	safeTopic := url.PathEscape(topic)
+	u := fmt.Sprintf("%s/consume/%s?%s", c.baseURL, safeTopic, params.Encode())
 
 	baseBackoff := 1 * time.Second
 	maxBackoff := 32 * time.Second
 	currentBackoff := baseBackoff
 
 	for {
-		resp, err := c.httpClient.Get(u)
-		if err != nil {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		resp, err := c.httpClient.Do(req)
+
+		if err != nil {
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
 		if resp.StatusCode == http.StatusNotFound {
 			resp.Body.Close()
-			currentBackoff = baseBackoff 
+			currentBackoff = baseBackoff
 			continue
 		}
 
 		if resp.StatusCode == http.StatusOK {
-
 			var msg message.Message
-
 			var msgList []message.Message
-			bodyBytes, err := ioReadAll(resp.Body)
+
+			var buf bytes.Buffer
+			_, err := buf.ReadFrom(resp.Body)
+			bodyBytes := buf.Bytes()
+
 			resp.Body.Close()
 			if err != nil {
 				continue
@@ -128,18 +138,19 @@ func (c *Client) Subscribe(topic string, options SubscriptionOptions, handler Me
 
 			err = handler(msg)
 
+			safeMsgID := url.PathEscape(msg.ID)
+
 			if err == nil {
-				ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, topic, msg.ID)
+				ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, safeTopic, safeMsgID)
 				if ackResp, ackErr := c.httpClient.Post(ackURL, "application/json", nil); ackErr == nil {
 					ackResp.Body.Close()
 				}
 				currentBackoff = baseBackoff
 			} else {
-
 				fmt.Printf("[SDK Resilience] Handler Failed: %v.\n", err)
 				fmt.Printf("[SDK Resilience] Re-queuing message %s to preserve...\n", msg.ID)
 
-				ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, topic, msg.ID)
+				ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, safeTopic, safeMsgID)
 				if ackResp, ackErr := c.httpClient.Post(ackURL, "application/json", nil); ackErr == nil {
 					ackResp.Body.Close()
 				}
@@ -162,14 +173,4 @@ func (c *Client) Subscribe(topic string, options SubscriptionOptions, handler Me
 		}
 		resp.Body.Close()
 	}
-}
-
-func ioReadAll(r ioReader) ([]byte, error) {
-	var buf bytes.Buffer
-	_, err := buf.ReadFrom(r)
-	return buf.Bytes(), err
-}
-
-type ioReader interface {
-	Read(p []byte) (n int, err error)
 }

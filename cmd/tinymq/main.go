@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -111,7 +115,12 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	topic := parts[2]
 
 	if group := r.URL.Query().Get("group"); group != "" {
-		topic = s.broker.CreateGroup(topic, group)
+		vt, err := s.broker.CreateGroup(topic, group)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		topic = vt
 	}
 
 	timeoutStr := r.URL.Query().Get("timeout")
@@ -244,6 +253,8 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+
 	var msg message.Message
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		http.Error(w, "Invalid message format", http.StatusBadRequest)
@@ -293,6 +304,11 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
+
+	if err := validateWebhookURL(payload.URL); err != nil {
+		http.Error(w, fmt.Sprintf("Security rejection: %v", err), http.StatusForbidden)
+		return
+	}
 
 	s.broker.RegisterWebhook(topic, payload.URL)
 
@@ -487,11 +503,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	stats, totalWebhooks := s.broker.GetStats()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	
+
 	fmt.Fprintf(w, "# HELP tinymq_topics_total Total Queue/Topics active on Memory\n")
 	fmt.Fprintf(w, "# TYPE tinymq_topics_total gauge\n")
 	fmt.Fprintf(w, "tinymq_topics_total %d\n\n", len(stats))
-	
+
 	fmt.Fprintf(w, "# HELP tinymq_webhooks_total Subscribed URLs\n")
 	fmt.Fprintf(w, "# TYPE tinymq_webhooks_total gauge\n")
 	fmt.Fprintf(w, "tinymq_webhooks_total %d\n\n", totalWebhooks)
@@ -531,7 +547,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	spyChan := s.broker.AddSpy(topic)
-	
+
 	ctx := r.Context()
 	defer s.broker.RemoveSpy(topic, spyChan)
 
@@ -550,6 +566,56 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// Middleware de autenticación global (Soporta Bearer y Basic Auth)
+func withAuth(next http.HandlerFunc) http.HandlerFunc {
+	token := os.Getenv("TINYMQ_API_KEY")
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		if token == "" {
+			next(w, r)
+			return
+		}
+
+		authHeader := r.Header.Get("Authorization")
+
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			got := strings.TrimPrefix(authHeader, "Bearer ")
+			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
+				next(w, r)
+				return
+			}
+		}
+
+		_, pwd, ok := r.BasicAuth()
+		if ok && subtle.ConstantTimeCompare([]byte(pwd), []byte(token)) == 1 {
+			next(w, r)
+			return
+		}
+
+		w.Header().Set("WWW-Authenticate", `Basic realm="TinyMQ Secure Dashboard"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+}
+
+func validateWebhookURL(rawURL string) error {
+	u, err := url.ParseRequestURI(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return errors.New("only valid http/https URLs are allowed")
+	}
+
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil {
+		return errors.New("could not resolve webhook hostname")
+	}
+
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return errors.New("webhook URL resolves to a forbidden private/internal network address")
+		}
+	}
+	return nil
 }
 
 func main() {
@@ -603,10 +669,10 @@ func main() {
 				compactionInterval = d
 			}
 		}
-		
+
 		ticker := time.NewTicker(compactionInterval)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-ticker.C:
@@ -629,17 +695,17 @@ func main() {
 	srv := &Server{broker: b}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/publish/", srv.handlePublish)
-	mux.HandleFunc("/consume/", srv.handleConsume)
-	mux.HandleFunc("/ack/", srv.handleAck)
-	mux.HandleFunc("/requeue", srv.handleRequeue)
-	mux.HandleFunc("/webhook/", srv.handleRegisterWebhook)
-	mux.HandleFunc("/api/topics", srv.handleCreateTopic)
-	mux.HandleFunc("/stream/", srv.handleStream)
-	mux.HandleFunc("/dashboard", srv.handleDashboard)
-	mux.HandleFunc("/metrics", srv.handleMetrics)
+	mux.HandleFunc("/publish/", withAuth(srv.handlePublish))
+	mux.HandleFunc("/consume/", withAuth(srv.handleConsume))
+	mux.HandleFunc("/ack/", withAuth(srv.handleAck))
+	mux.HandleFunc("/requeue", withAuth(srv.handleRequeue))
+	mux.HandleFunc("/webhook/", withAuth(srv.handleRegisterWebhook))
+	mux.HandleFunc("/api/topics", withAuth(srv.handleCreateTopic))
+	mux.HandleFunc("/stream/", withAuth(srv.handleStream))
+	mux.HandleFunc("/dashboard", withAuth(srv.handleDashboard))
+	mux.HandleFunc("/metrics", withAuth(srv.handleMetrics))
 
-	mux.HandleFunc("/api/queues", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/queues", withAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			srv.handleListQueues(w, r)
@@ -648,13 +714,13 @@ func main() {
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/api/queues/publish", srv.handleQueuePublish)
-	mux.HandleFunc("/api/queues/consume", srv.handleQueueConsume)
-	mux.HandleFunc("/api/queues/peek", srv.handleQueuePeek)
-	mux.HandleFunc("/api/queues/purge", srv.handleQueuePurge)
-	mux.HandleFunc("/api/queues/delete", srv.handleQueueDelete)
-	mux.HandleFunc("/api/queues/webhooks", srv.handleGetWebhooks)
+	}))
+	mux.HandleFunc("/api/queues/publish", withAuth(srv.handleQueuePublish))
+	mux.HandleFunc("/api/queues/consume", withAuth(srv.handleQueueConsume))
+	mux.HandleFunc("/api/queues/peek", withAuth(srv.handleQueuePeek))
+	mux.HandleFunc("/api/queues/purge", withAuth(srv.handleQueuePurge))
+	mux.HandleFunc("/api/queues/delete", withAuth(srv.handleQueueDelete))
+	mux.HandleFunc("/api/queues/webhooks", withAuth(srv.handleGetWebhooks))
 
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		stats, totalWebhooks := b.GetStats()

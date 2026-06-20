@@ -48,6 +48,7 @@ You can interact with TinyMQ via `curl`, Go, Python, Node.js, Rust, etc. Payload
 **Endpoint:** `POST /publish/{topic}`
 
 **Headers (Optional):**
+- `Authorization`: Required if `TINYMQ_API_KEY` is set. Format: `Bearer <your_token>`.
 - `Idempotency-Key`: A unique string. If a network retry occurs within 5 minutes with the same key, the broker will safely ignore the duplicate and return `200 OK` (status: `ignored`) without duplicating the payload.
 
 **Query Parameters (Optional):**
@@ -134,6 +135,7 @@ curl "[http://127.0.0.1:7800/metrics](http://127.0.0.1:7800/metrics)"
 ### Register a Webhook (Push Consumers)
 
 For passive integration, TinyMQ can take the initiative and push messages directly to your external services (Fire-and-Forget).
+> **Security Note:** To prevent Server-Side Request Forgery (SSRF) attacks, the broker strictly validates the provided URL. It will actively reject any webhook destinations that resolve to loopback (`localhost`), private (e.g., `192.168.x.x`, `10.x.x.x`), or link-local internal network addresses.
 
 **Endpoint:** `POST /webhook/{topic}`
 
@@ -318,6 +320,8 @@ func main() {
 To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
 - **Max Payload Size:** `2 MB` per HTTP request. Exceeding this limit will safely abort the connection and return an `HTTP 413 Request Entity Too Large` error.
 - **Max Queue Capacity:** Configurable via `TINYMQ_MAX_MESSAGES` (Default: `100,000`). Controls the memory footprint per topic. When exceeded, the broker follows the `TINYMQ_DEFAULT_POLICY` (reject or drop-oldest).
+- **Topic & Group Validation:** To prevent Path Traversal injections, all topic and consumer group names are strictly validated against the `^[a-zA-Z0-9._:-]+$` regex. The underlying disk engine also actively blocks any paths containing `..`, `/`, or `\`.
+- **Max Active Topics:** Configurable via `TINYMQ_MAX_TOPICS` (Default: `10,000`). Prevents Denial of Service (DoS) attacks that attempt to exhaust server RAM by dynamically generating millions of unique topic names. If the limit is reached, topic creation requests are safely rejected.
 
 ---
 
@@ -342,7 +346,10 @@ docker run -d \
 - `PORT`: HTTP listening port (default `7800`).
 - `TINYMQ_FSYNC`: Set to `true` to force physical disk flushes (Bank-grade durability).
 - `TINYMQ_COMPACT_INTERVAL`: Background WAL garbage collector interval (default `10m`).
-- `TINYMQ_DEFAULT_POLICY`: Defines memory behavior when a queue hits its 100,000 limit. Set to `reject` (returns HTTP 429) or `drop-oldest` (acts as a Ring Buffer, evicting the oldest message to accommodate new ones).
+- `TINYMQ_DEFAULT_POLICY`: Defines memory behavior when a queue hits its limit. Set to `reject` (returns HTTP 429) or `drop-oldest` (acts as a Ring Buffer).
+- `TINYMQ_MAX_MESSAGES`: Maximum number of messages held in `RAM` per topic (default `100000`).
+- `TINYMQ_API_KEY`: Secures the broker. If set, all endpoints (including the Dashboard) will require an `Authorization: Bearer  HTTP header`.
+- `TINYMQ_MAX_TOPICS`: Limits the maximum number of unique topics/queues allowed in memory (default `10000`) to protect against DoS attacks.
 
 ### Persistent data (Docker Compose)
 

@@ -7,5 +7,5 @@ services:
     ports:
       - "${PORT:-7800}:7800" 
     volumes:
-      - ./data:/root/data
+      - ./data:/home/tinymq/data
     restart: unless-stopped

@@ -4,6 +4,37 @@ All notable changes of the proyect will be documented on this file.
 
 ---
 
+## [2.5.0] - 2026-06-20 — Major Fixes and Stability Update
+
+## Security
+- **Global API Authentication (CWE-306):** Implemented a mandatory hybrid authentication middleware. Programmatic clients can use `Bearer <token>`, while web browsers gracefully fallback to native HTTP Basic Auth prompts for seamless, secure Dashboard access. Configured via the `TINYMQ_API_KEY` environment variable.
+- **Path Traversal via Consumer Groups (CWE-22):** Fixed a critical vulnerability where an attacker could exploit the `?group=` query parameter to write `.log` files outside of the configured `./data` directory.
+  - The `CreateGroup` method now strictly enforces alphanumeric regex validation.
+  - The underlying `DiskStorage` engine now explicitly rejects any topic names containing `..`, `/`, or `\` as a defense-in-depth measure.
+- **Server-Side Request Forgery (SSRF) in Webhooks (CWE-918):** Fixed a critical vulnerability where attackers could register internal or private IP addresses (e.g., `localhost` or AWS metadata endpoints) as webhook destinations. The webhook registration endpoint now strictly resolves hostnames and explicitly blocks loopback, private, and link-local IP ranges.
+- **Unbounded Body in Requeue (CWE-770):** Applied `http.MaxBytesReader` (2MB limit) to the `/requeue` endpoint, matching the main `/publish` endpoints, preventing memory exhaustion from massive payload injections.
+- **Docker Root Privilege Escalation Risk (CWE-269):** Hardened the Docker image. The container no longer runs as `root`. A dedicated unprivileged user (`UID 10001`) is now created during the builder phase and explicitly enforced in the final `scratch` image.
+
+## Reliability & Stability
+- **DoS Protection via Topic Limits (CWE-770):** Addressed a high-severity vulnerability where an attacker could exhaust broker memory by repeatedly consuming from dynamically generated, non-existent topic names.
+  - Added the `TINYMQ_MAX_TOPICS` environment variable (Default: `10,000`).
+  - `Publish`, `Consume`, `CreateGroup`, and `CreateTopic` now proactively enforce this global ceiling, returning safe errors/empty responses if the broker reaches maximum capacity.
+- **Server Crash via Invalid Wildcard Regex (CWE-476):** Fixed a high-severity vulnerability where consuming a malformed wildcard pattern (e.g., `foo(*`) would cause a nil pointer dereference panic, crashing the entire broker. `regexp.Compile` errors are now properly handled, gracefully aborting invalid wildcard queries instead of crashing the process.
+- **Idempotency Cache Unbounded Growth (CWE-770):** Added a hard limit (`20,000` keys) to the idempotency map. If under a massive flood of unique keys within the 5-minute window, the broker gracefully stops caching new keys instead of growing RAM indefinitely.
+- **Concurrent Deletion Race Condition:** Fixed a critical concurrency bug where deleting a topic while simultaneously publishing to it could result in orphaned `.log` files or silent message loss. Implemented a strict `Deleted` atomic flag within the Topic mutex to safely abort pending publish routines if the topic is undergoing deletion.
+
+## Performance
+- **O(N²) CPU Bottleneck in Queue Dequeue:** Completely rewrote the `extractMessages` internal function. It previously used in-place array shifting, which caused exponential CPU degradation when reading from queues with tens of thousands of messages. It now uses a single-pass buffer allocation `O(N)`, drastically reducing CPU load and Garbage Collection pauses during high-throughput consumption.
+
+## Fixed
+- **False-Positive Acknowledgments:** Fixed a logical bug in the `/ack/{topic}/{id}` endpoint. Previously, acknowledging a non-existent or already processed message would incorrectly return a `200 OK` success response and write a spurious `ACK` record to the Write-Ahead Log. It now correctly returns a `404 Not Found` and prevents unnecessary disk I/O.
+- **Environment Parser Precedence & Formatting:** Fixed `internal/helper/env.go` to properly strip quotation marks (`"`) from values. It now correctly respects OS-level environment variables (e.g., set via Docker or Kubernetes), applying `.env` values only as fallbacks.
+- **URL Encoding in SDK and CLI:** Fixed multiple bugs in `client/client.go` and `cmd/tmq` where topic names or message IDs containing spaces, `#`, `%`, or `/` would corrupt HTTP requests. All path variables are now strictly sanitized using `url.PathEscape`.
+- **SDK Graceful Shutdown:** The `client.Subscribe()` method now accepts a `context.Context` parameter, allowing long-polling workers to be gracefully cancelled and shut down without needing to forcefully kill the parent process.
+
+## Quality & CI/CD
+- **Strict CI Pipeline Enforcement:** Added comprehensive GitHub Actions workflows (`ci.yaml`). All pull requests and pushes to `main` now strictly require passing `go vet` static analysis, `gofmt` compliance, and successful compilation of both the server and CLI binaries.
+
 ---
 ## [2.3.0] - 2026-06-20 — Pub/Sub, Bounded Queues & Configurable Limits
 

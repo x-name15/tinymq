@@ -3,9 +3,11 @@ package storage
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,7 +44,18 @@ func New(dataDir string, syncWrites bool) (*DiskStorage, error) {
 	}, nil
 }
 
+func isSafePath(topic string) error {
+	if strings.Contains(topic, "..") || strings.Contains(topic, "/") || strings.Contains(topic, "\\") {
+		return errors.New("unsafe topic name detected, path traversal aborted")
+	}
+	return nil
+}
+
 func (s *DiskStorage) writeRecord(topic string, record LogRecord) error {
+	if err := isSafePath(topic); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -88,6 +101,10 @@ func (s *DiskStorage) AppendAck(topic string, msgID string) error {
 }
 
 func (s *DiskStorage) LoadMessages(topic string) ([]message.Message, error) {
+	if err := isSafePath(topic); err != nil {
+		return nil, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -134,6 +151,10 @@ func (s *DiskStorage) LoadMessages(topic string) ([]message.Message, error) {
 }
 
 func (s *DiskStorage) CompactLog(topic string) error {
+	if err := isSafePath(topic); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -220,6 +241,10 @@ func (s *DiskStorage) CloseAll() error {
 }
 
 func (s *DiskStorage) ClearLog(topic string) error {
+	if err := isSafePath(topic); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -236,6 +261,10 @@ func (s *DiskStorage) ClearLog(topic string) error {
 }
 
 func (s *DiskStorage) DeleteLog(topic string) error {
+	if err := isSafePath(topic); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

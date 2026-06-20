@@ -397,6 +397,11 @@
 
         let currentTargetQueue = "";
 
+        function escapeHtml(s) {
+            if (!s) return "";
+            return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
         async function createNewTopic() {
             const topicName = prompt("Enter Queue/Topic name (e.g., 'orders.process'):");
             if (!topicName || topicName.trim() === "") return;
@@ -532,7 +537,7 @@
                         <button class="copy-btn" onclick="copyRawText('${safePayload}')">Copy</button>
                         <span style="color:#4db8ff; font-weight:bold;">#${index + 1} | ID: ${msg.id}</span>
                         <hr style="border-color: #2d3748; margin: 8px 0;">
-                        ${displayPayload}
+                        ${escapeHtml(displayPayload)}
                     </div>`;
                 });
                 output.innerHTML = html;
@@ -564,7 +569,7 @@
                 const msgHtml = `
                     <div class="tail-msg">
                         <div class="tail-timestamp">[${timeStr}] ID: ${data.id.split('-')[0]}...</div>
-                        <div style="color: #fff;">${displayPayload}</div>
+                        <div style="color: #fff;">${escapeHtml(displayPayload)}</div>
                     </div>
                 `;
                 
@@ -593,7 +598,7 @@
                 if(urls.length === 0) {
                     whList.innerHTML = "<div class='wh-item' style='color: var(--muted-color); text-align:center;'>No webhooks registered yet.</div>";
                 } else {
-                    whList.innerHTML = urls.map(url => `<div class='wh-item'>📡 ${url}</div>`).join('');
+                    whList.innerHTML = urls.map(url => `<div class='wh-item'>📡 ${escapeHtml(url)}</div>`).join('');
                 }
             } catch(e) { whList.innerHTML = "<p style='color: #e53e3e;'>Error loading webhooks</p>"; }
         }

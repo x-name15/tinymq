@@ -9,7 +9,7 @@ import (
 func LoadEnv() {
 	file, err := os.Open(".env")
 	if err != nil {
-		return 
+		return
 	}
 	defer file.Close()
 
@@ -21,7 +21,14 @@ func LoadEnv() {
 		}
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
-			os.Setenv(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+
+			val = strings.Trim(val, `"'`)
+
+			if _, alreadySet := os.LookupEnv(key); !alreadySet {
+				os.Setenv(key, val)
+			}
 		}
 	}
 

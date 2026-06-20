@@ -1,0 +1,41 @@
+name: TinyMQ CI Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23' 
+        cache: true
+
+    - name: Verify Code Formatting
+      run: |
+        if [ -n "$(gofmt -l .)" ]; then
+          echo "These files are not formatted properly:"
+          gofmt -l .
+          echo "Please run 'gofmt -w .' locally and commit the changes."
+          exit 1
+        fi
+
+    - name: Run Go Vet (Static Analysis)
+      run: go vet ./...
+
+    - name: Build TinyMQ Binary
+      run: CGO_ENABLED=0 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
+      
+    - name: Build CLI Binary
+      run: CGO_ENABLED=0 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+
+    - name: Docker Build Check
+      run: docker build -t tinymq:test .

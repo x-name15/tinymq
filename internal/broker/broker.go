@@ -23,27 +23,28 @@ type Topic struct {
 	Messages         []message.Message
 	waitingConsumers []chan message.Message
 	spies            []chan message.Message
-	Policy 			 string
+	Policy           string
+	Deleted          bool
 	mu               sync.Mutex
 }
 
 type Broker struct {
-	mu            	sync.RWMutex
-	Topics        	map[string]*Topic
-	storage       	*storage.DiskStorage
-	compiledRegex 	map[string]*regexp.Regexp
-	webhooks      	map[string][]string
-	webhookClient 	*http.Client
+	mu              sync.RWMutex
+	Topics          map[string]*Topic
+	storage         *storage.DiskStorage
+	compiledRegex   map[string]*regexp.Regexp
+	webhooks        map[string][]string
+	webhookClient   *http.Client
 	idempotencyKeys map[string]time.Time
 	bindings        map[string]map[string]bool
 }
 
 type TopicStat struct {
-	Name            string
-	MessageCount    int
+	Name             string
+	MessageCount     int
 	WaitingConsumers int
-	IsDLQ           bool
-	HasWebhooks     bool
+	IsDLQ            bool
+	HasWebhooks      bool
 }
 
 var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
@@ -53,19 +54,27 @@ func New(store *storage.DiskStorage) *Broker {
 		Topics:          make(map[string]*Topic),
 		storage:         store,
 		compiledRegex:   make(map[string]*regexp.Regexp),
-		webhooks:      	 make(map[string][]string),
-		webhookClient: 	 &http.Client{Timeout: 10 * time.Second},
+		webhooks:        make(map[string][]string),
+		webhookClient:   &http.Client{Timeout: 10 * time.Second},
 		idempotencyKeys: make(map[string]time.Time),
 		bindings:        make(map[string]map[string]bool),
 	}
 }
 
 func getMaxMessages() int {
-    val := os.Getenv("TINYMQ_MAX_MESSAGES")
-    if limit, err := strconv.Atoi(val); err == nil && limit > 0 {
-        return limit
-    }
-    return 100000 
+	val := os.Getenv("TINYMQ_MAX_MESSAGES")
+	if limit, err := strconv.Atoi(val); err == nil && limit > 0 {
+		return limit
+	}
+	return 100000
+}
+
+func getMaxTopics() int {
+	val := os.Getenv("TINYMQ_MAX_TOPICS")
+	if limit, err := strconv.Atoi(val); err == nil && limit > 0 {
+		return limit
+	}
+	return 10000
 }
 
 func (b *Broker) LoadExistingTopics(topicNames []string) {
@@ -78,7 +87,7 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 		if strings.Contains(name, "::") {
 			parts := strings.SplitN(name, "::", 2)
 			sourceTopic := parts[0]
-			
+
 			b.mu.Lock()
 			if b.bindings[sourceTopic] == nil {
 				b.bindings[sourceTopic] = make(map[string]bool)
@@ -86,7 +95,7 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 			b.bindings[sourceTopic][name] = true
 			b.mu.Unlock()
 		}
-		
+
 		msgs, err := b.storage.LoadMessages(name)
 		if err != nil {
 			log.Printf("Failed to recover topic %s: %v\n", name, err)
@@ -96,7 +105,7 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 		b.mu.Lock()
 		b.Topics[name] = &Topic{
 			Name:     name,
-			Messages: msgs, 
+			Messages: msgs,
 			Policy:   defaultPolicy,
 		}
 		b.mu.Unlock()
@@ -132,6 +141,11 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 
 	b.mu.Lock()
 	if _, exists := b.Topics[topicName]; !exists {
+		if len(b.Topics) >= getMaxTopics() {
+			b.mu.Unlock()
+			return errors.New("broker maximum topic limit reached")
+		}
+
 		policy := os.Getenv("TINYMQ_DEFAULT_POLICY")
 		if policy != "drop-oldest" {
 			policy = "reject"
@@ -146,7 +160,11 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 			reg, exists := b.compiledRegex[name]
 			if !exists {
 				regexPattern := "^" + strings.ReplaceAll(name, "*", ".*") + "$"
-				reg, _ = regexp.Compile(regexPattern)
+				compiled, err := regexp.Compile(regexPattern)
+				if err != nil {
+					continue
+				}
+				reg = compiled
 				b.compiledRegex[name] = reg
 			}
 			if reg != nil && reg.MatchString(topicName) {
@@ -206,6 +224,13 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		return nil
 	}
 
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.Deleted {
+		return errors.New("topic was concurrently deleted")
+	}
+
 	if b.storage != nil {
 		if err := b.storage.AppendPut(topicName, msg); err != nil {
 			log.Printf("Error persisting PUT record: %v\n", err)
@@ -240,7 +265,7 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		if t.Policy == "drop-oldest" {
 			oldestMsg := t.Messages[0]
 			t.Messages = t.Messages[1:]
-			
+
 			if b.storage != nil {
 				if err := b.storage.AppendAck(topicName, oldestMsg.ID); err != nil {
 					log.Printf("Eviction ACK logging failed: %v\n", err)
@@ -266,35 +291,48 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 
 func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
 	var results []message.Message
-	
-	for i := 0; i < len(t.Messages) && len(results) < limit; i++ {
-		msg := t.Messages[i]
-		
-		if msg.ExpiresAt != nil && time.Now().After(*msg.ExpiresAt) {
-			t.Messages = append(t.Messages[:i], t.Messages[i+1:]...)
-			if b.storage != nil {
-				b.storage.AppendAck(t.Name, msg.ID)
-			}
-			i--
+	var keep []message.Message
+
+	now := time.Now()
+
+	for _, msg := range t.Messages {
+		if len(results) >= limit {
+			keep = append(keep, msg)
 			continue
 		}
 
-		if msg.DeliverAt != nil && time.Now().Before(*msg.DeliverAt) {
+		if msg.ExpiresAt != nil && now.After(*msg.ExpiresAt) {
+			if b.storage != nil {
+				b.storage.AppendAck(t.Name, msg.ID)
+			}
+			continue
+		}
+
+		if msg.DeliverAt != nil && now.Before(*msg.DeliverAt) {
+			keep = append(keep, msg)
 			continue
 		}
 
 		results = append(results, msg)
-		t.Messages = append(t.Messages[:i], t.Messages[i+1:]...)
-		i--
 	}
+
+	t.Messages = keep
 	return results
 }
 
 func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Message) ([]message.Message, bool) {
+	cleanName := strings.ReplaceAll(topicName, "*", "")
+	if len(cleanName) > 0 && !validTopicRegex.MatchString(cleanName) {
+		return nil, false
+	}
 	b.mu.Lock()
 
 	if !strings.Contains(topicName, "*") {
 		if _, exists := b.Topics[topicName]; !exists {
+			if len(b.Topics) >= getMaxTopics() {
+				b.mu.Unlock()
+				return nil, false
+			}
 			b.Topics[topicName] = &Topic{Name: topicName}
 		}
 		t := b.Topics[topicName]
@@ -315,12 +353,17 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 	reg, exists := b.compiledRegex[topicName]
 	if !exists {
 		regexPattern := "^" + strings.ReplaceAll(topicName, "*", ".*") + "$"
-		reg, _ = regexp.Compile(regexPattern)
+		compiled, err := regexp.Compile(regexPattern)
+		if err != nil {
+			b.mu.Unlock()
+			return nil, false
+		}
+		reg = compiled
 		b.compiledRegex[topicName] = reg
 	}
 
 	for name, t := range b.Topics {
-		if reg.MatchString(name) {
+		if reg != nil && reg.MatchString(name) {
 			t.mu.Lock()
 			results := b.extractMessages(t, limit)
 			t.mu.Unlock()
@@ -333,6 +376,10 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 	}
 
 	if _, exists := b.Topics[topicName]; !exists {
+		if len(b.Topics) >= getMaxTopics() {
+			b.mu.Unlock()
+			return nil, false
+		}
 		b.Topics[topicName] = &Topic{Name: topicName}
 	}
 	wildcardTopic := b.Topics[topicName]
@@ -384,17 +431,19 @@ func (b *Broker) Ack(topicName string, msgID string) bool {
 		}
 	}
 
-	if b.storage != nil {
-		if err := b.storage.AppendAck(topicName, msgID); err != nil {
-			log.Printf("Error persisting ACK record: %v\n", err)
-		}
-	}
-
 	if foundIndex != -1 {
 		t.Messages[foundIndex] = message.Message{}
 		t.Messages = append(t.Messages[:foundIndex], t.Messages[foundIndex+1:]...)
+
+		if b.storage != nil {
+			if err := b.storage.AppendAck(topicName, msgID); err != nil {
+				log.Printf("Error persisting ACK record: %v\n", err)
+			}
+		}
+		return true
 	}
-	return true
+
+	return false
 }
 
 func (b *Broker) GetStats() ([]TopicStat, int) {
@@ -487,8 +536,12 @@ func (b *Broker) CreateTopic(topicName string, policy string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if len(b.Topics) >= getMaxTopics() {
+		return errors.New("broker maximum topic limit reached")
+	}
+
 	if _, exists := b.Topics[topicName]; exists {
-		return errors.New("The Topic already exists")
+		return errors.New("the Topic already exists")
 	}
 
 	if policy != "drop-oldest" {
@@ -543,7 +596,7 @@ func (b *Broker) Purge(topicName string) error {
 	}
 
 	t.mu.Lock()
-	t.Messages = nil 
+	t.Messages = nil
 	t.mu.Unlock()
 
 	if b.storage != nil {
@@ -555,10 +608,15 @@ func (b *Broker) Purge(topicName string) error {
 
 func (b *Broker) DeleteTopic(topicName string) error {
 	b.mu.Lock()
-	if _, exists := b.Topics[topicName]; !exists {
+	t, exists := b.Topics[topicName]
+	if !exists {
 		b.mu.Unlock()
 		return errors.New("queue not found")
 	}
+
+	t.mu.Lock()
+	t.Deleted = true
+	t.mu.Unlock()
 
 	delete(b.Topics, topicName)
 	delete(b.webhooks, topicName)
@@ -575,7 +633,7 @@ func (b *Broker) DeleteTopic(topicName string) error {
 func (b *Broker) GetWebhooks(topicName string) []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	
+
 	urls := b.webhooks[topicName]
 	result := make([]string, len(urls))
 	copy(result, urls)
@@ -586,20 +644,18 @@ func (b *Broker) IsIdempotent(key string) bool {
 	if key == "" {
 		return false
 	}
-	
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	now := time.Now()
-	
+
 	if exp, exists := b.idempotencyKeys[key]; exists {
 		if now.Before(exp) {
-			return true 
+			return true
 		}
 	}
-	
-	b.idempotencyKeys[key] = now.Add(5 * time.Minute)
-	
+
 	if len(b.idempotencyKeys) > 5000 {
 		for k, v := range b.idempotencyKeys {
 			if now.After(v) {
@@ -607,7 +663,13 @@ func (b *Broker) IsIdempotent(key string) bool {
 			}
 		}
 	}
-	
+
+	const maxIdempotencyKeys = 20000
+	if len(b.idempotencyKeys) >= maxIdempotencyKeys {
+		return false
+	}
+
+	b.idempotencyKeys[key] = now.Add(5 * time.Minute)
 	return false
 }
 
@@ -622,7 +684,7 @@ func (b *Broker) AddSpy(topicName string) chan message.Message {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	ch := make(chan message.Message, 50)
 	t.spies = append(t.spies, ch)
 	return ch
@@ -648,20 +710,32 @@ func (b *Broker) RemoveSpy(topicName string, ch chan message.Message) {
 	}
 }
 
-func (b *Broker) CreateGroup(topicName, groupName string) string {
+func (b *Broker) CreateGroup(topicName, groupName string) (string, error) {
+	if !validTopicRegex.MatchString(groupName) {
+		return "", errors.New("invalid group name format")
+	}
+
 	virtualName := fmt.Sprintf("%s::%s", topicName, groupName)
-	
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	if b.bindings[topicName] == nil {
 		b.bindings[topicName] = make(map[string]bool)
 	}
 	b.bindings[topicName][virtualName] = true
 
 	if _, exists := b.Topics[virtualName]; !exists {
-		b.Topics[virtualName] = &Topic{Name: virtualName}
+		if len(b.Topics) >= getMaxTopics() {
+			return "", errors.New("broker maximum topic limit reached")
+		}
+
+		policy := os.Getenv("TINYMQ_DEFAULT_POLICY")
+		if policy != "drop-oldest" {
+			policy = "reject"
+		}
+		b.Topics[virtualName] = &Topic{Name: virtualName, Policy: policy}
 	}
-	
-	return virtualName
+
+	return virtualName, nil
 }

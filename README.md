@@ -10,96 +10,122 @@
 A tiny, ultra-lightweight message broker for side projects, prototypes, and internal tools. 
 Built from scratch in Go with zero external heavy dependencies.
 
-TinyMQ offers a true "plug & play" alternative to heavy brokers like RabbitMQ or Kafka. No complex clusters, no Erlang, no JVM — just a single Dockerized binary with built-in disk persistence, strict FIFO delivery, wildcard routing, and a simple HTTP API.
+**TinyMQ** offers a true "plug & play" alternative to heavy brokers like RabbitMQ or Kafka. No complex clusters, no Erlang, no JVM — just a single Dockerized binary with built-in disk persistence, strict FIFO delivery, wildcard routing, and a simple HTTP API.
 
 ## Key Features
 
-- **Zero Dependencies:** Pure Go implementation under ~15MB. Extremely low RAM and CPU footprint.
-- **Consumer Groups (Pub/Sub):** Multiple microservices can read the same event stream independently via Virtual Topic Binding (`?group=name`) without competing for payloads.
-- **Smart Disk Persistence & GC:** Append-only Write-Ahead Log (`.log`) architecture with a background Auto-Compactor (Garbage Collector) to prevent infinite disk growth.
-- **Strict Durability (FSync):** Configurable bank-grade physical disk flushing after every operation to protect against sudden power loss.
-- **Live Streaming (SSE):** Real-time, non-destructive topic monitoring (`GET /stream`) utilizing native Server-Sent Events.
-- **Dead Letter Queues (DLQ):** Automatically isolates "poison pill" messages after 3 failed retries to keep your main pipelines flowing.
-- **Time-Based Routing:** Schedule delayed messages for the future or set expiration times natively (TTL).
-- **Network Idempotency:** Caches `Idempotency-Key` headers to safely ignore duplicate publish requests caused by network retries.
-- **Batching & Prefetch:** Pull multiple messages in a single HTTP call (`?limit=X`) to drastically reduce network overhead.
-- **Push Consumers (Webhooks):** Passive integration. Let the broker `POST` directly to your external endpoints.
-- **Native Observability:** Built-in `/metrics` endpoint formatted natively for Prometheus scraping, requiring zero external agents.
-- **Interactive UI & CLI Tool:** Built-in web Dashboard to monitor queues visually, and a native terminal CLI (`tmq`) for management, offline backups, and high-concurrency stress testing (`bench`).
-- **Graceful Shutdown:** Safely flushes OS-level buffers to disk on `SIGTERM`/`SIGINT` to prevent data loss.
-- **Plug & Play Configuration:** Auto-loads `.env` files dynamically. No complex XML/YAML configuration files required.
+| Feature | Description |
+|---------|-------------|
+| **Zero Dependencies** | Pure Go implementation under ~15MB. Extremely low RAM and CPU footprint. |
+| **Consumer Groups (Pub/Sub)** | Multiple microservices can read the same event stream independently via Virtual Topic Binding (`?group=name`) without competing for payloads. |
+| **Smart Disk Persistence & GC** | Append-only Write-Ahead Log (`.log`) architecture with a background Auto-Compactor (Garbage Collector) to prevent infinite disk growth. |
+| **Strict Durability (FSync)** | Configurable bank-grade physical disk flushing after every operation to protect against sudden power loss. |
+| **Live Streaming (SSE)** | Real-time, non-destructive topic monitoring (`GET /stream`) utilizing native Server-Sent Events. |
+| **Dead Letter Queues (DLQ)** | Automatically isolates "poison pill" messages after 3 failed retries to keep your main pipelines flowing. |
+| **Time-Based Routing** | Schedule delayed messages for the future or set expiration times natively (TTL). |
+| **Network Idempotency** | Caches `Idempotency-Key` headers to safely ignore duplicate publish requests caused by network retries. |
+| **Batching & Prefetch** | Pull multiple messages in a single HTTP call (`?limit=X`) to drastically reduce network overhead. |
+| **Push Consumers (Webhooks)** | Passive integration. Let the broker `POST` directly to your external endpoints. |
+| **Native Observability** | Built-in `/metrics` endpoint formatted natively for Prometheus scraping, requiring zero external agents. |
+| **Interactive UI & CLI** | Built-in web Dashboard to monitor queues visually, and a native terminal CLI (`tmq`) for management, offline backups, and high-concurrency stress testing (`bench`). |
+| **Graceful Shutdown** | Safely flushes OS-level buffers to disk on `SIGTERM`/`SIGINT` to prevent data loss. |
+| **Plug & Play Configuration** | Auto-loads `.env` files dynamically. No complex XML/YAML configuration files required. |
 
-## Why use TinyMQ? 
+## Why use TinyMQ?
 
 Let's be honest: Kafka and RabbitMQ are incredible engineering marvels, but they are often **massive overkill** for small to medium projects. 
 Setting up an Erlang runtime, managing JVMs, or configuring Zookeeper/Kraft clusters just to pass a few JSON messages between three microservices is exhausting.
 
-TinyMQ solves the "over-engineering" problem. It is built for developers who need reliable, enterprise-grade asynchronous communication without the operational tax. 
+TinyMQ solves the "over-engineering" problem. It is built for developers who need reliable, enterprise-grade asynchronous communication without the operational tax.
 
-**You should use TinyMQ if:**
-- **You are building a side project or MVP** and want to move fast.
-- **You have limited server resources** (it runs smoothly on a $4/month VPS).
-- **You want true Plug & Play:** No XML/YAML config files, no heavy runtimes. Just run the binary or the ~25MB Docker image.
+### ✅ You should use TinyMQ if:
 
-**You should NOT use TinyMQ if:**
-- You need to process millions of messages per second.
-- You need highly available, multi-node clustering and distributed consensus.
+- **Building a side project or MVP** — move fast without operational overhead
+- **Limited server resources** — runs smoothly on a $4/month VPS
+- **Want true Plug & Play** — no XML/YAML config files, no heavy runtimes, just run it
 
-## Image of the Dashboard
+### ❌ You should NOT use TinyMQ if:
+
+- You need to process millions of messages per second
+- You need highly available, multi-node clustering and distributed consensus
+
+## Dashboard Preview
+
 ![TinyMQ Dashboard](images/tinymq-dash.png)
-- All in HTML & Vanilla JS btw
+
+*All in HTML & Vanilla JS* 
 
 ## Documentation
 
-See the full documentation in the [`docs` folder](./docs/DOCUMENTATION.md) for API reference, SDK usage, and architecture details.
-For more details, visit the official documentation website: [TinyMQ Docs](https://tinymq.mrjacket.dev/)
+📚 Full documentation: [docs folder](./docs/DOCUMENTATION.md) for API reference, SDK usage, and architecture details.
+
+📖 Official website: [TinyMQ Docs](https://tinymq.mrjacket.dev/)
 
 ## Quick Start (Docker)
 
-### Using the pre-built Docker images
-You can pull the official image from two different registries
+### 1.- Create your environment file (Optional but recommended)
 
-#### From GHCR
+Create a `.env` file in your current directory to configure security and limits. You can use the provided `.env.example` as a base.
+
+### 2.- Run using pre-built Docker images
+
+You can pull the official, highly-secured (non-root) image from two different registries:
+
+#### From GHCR (GitHub Container Registry)
+
 ```bash
-# From GitHub Container Registry
 docker pull ghcr.io/x-name15/tinymq:latest
 
 docker run -d \
   --name tinymq \
   -p 7800:7800 \
-  -v $(pwd)/data:/root/data \
-ghcr.io/x-name15/tinymq:latest
+  --env-file .env \
+  -v $(pwd)/data:/home/tinymq/data \
+  ghcr.io/x-name15/tinymq:latest
 ```
 
-### Or from Docker Hub
+#### From Docker Hub
+
 ```bash
 docker pull flez71/tinymq:latest
 
 docker run -d \
   --name tinymq \
   -p 7800:7800 \
-  -v $(pwd)/data:/root/data \
+  --env-file .env \
+  -v $(pwd)/data:/home/tinymq/data \
   flez71/tinymq:latest
 ```
-### And if you want, you can run the broker using our Docker Compose:
+
+### Or using Docker Compose (For building from source)
 
 ```bash
 git clone https://github.com/x-name15/tinymq.git
 cd tinymq
-docker compose up --build
+docker compose up --build -d
 ```
 
-The broker will start on port `7800`. Data persists locally in the `./data` directory. Access the UI at `http://localhost:7800/dashboard`.
+### Verification
+
+The broker will start on port `7800`. Data persists locally in the `./data` directory. 
+
+Access the dashboard at: **http://localhost:7800/dashboard**
+
+> **Security Note:** If you set `TINYMQ_API_KEY`, the dashboard will be protected. When prompted by your browser, you can leave the username blank (or type anything) and paste your API Key into the password field.
+---
 
 ## LICENSE
+
 TinyMQ is licensed under the GPL v3. See [`LICENSE`](./LICENSE) for details.
 
 ## Contributions
 
-If you find bugs or want to improve TinyMQ then:
+Found a bug or want to improve TinyMQ? We'd love your help!
+
 1. Fork the repo
-2. Create a branch with your feature
-3. Open a PR
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Open a Pull Request
 
 ### Credits
+
 **Author:** Mr Jacket / Felix Manrique

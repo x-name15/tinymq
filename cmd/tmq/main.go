@@ -167,7 +167,7 @@ func handlePublish(baseURL string, args []string) {
 		params.Add("broadcast", "true")
 	}
 
-	u := fmt.Sprintf("%s/publish/%s?%s", baseURL, topic, params.Encode())
+	u := fmt.Sprintf("%s/publish/%s?%s", baseURL, url.PathEscape(topic), params.Encode())
 	resp, err := http.Post(u, "application/json", bytes.NewBuffer([]byte(payload)))
 	if err != nil {
 		fmt.Printf("%s[Error] Network error: %v%s\n", colorRed, err, colorReset)
@@ -207,7 +207,7 @@ func handleConsume(baseURL string, args []string) {
 		params.Add("auto_ack", "false")
 	}
 
-	u := fmt.Sprintf("%s/consume/%s?%s", baseURL, topic, params.Encode())
+	u := fmt.Sprintf("%s/consume/%s?%s", baseURL, url.PathEscape(topic), params.Encode())
 	resp, err := http.Get(u)
 	if err != nil {
 		fmt.Printf("%s[Error] Network error: %v%s\n", colorRed, err, colorReset)
@@ -289,8 +289,9 @@ func handleTail(baseURL string, args []string) {
 
 	fmt.Printf("%sSpy Mode: Listening to '%s' in real-time... (Ctrl+C to exit)%s\n", colorBold+colorGreen, topic, colorReset)
 
+	safeTopic := url.PathEscape(topic)
 	for {
-		u := fmt.Sprintf("%s/consume/%s?timeout=5s&limit=1&auto_ack=true", baseURL, topic)
+		u := fmt.Sprintf("%s/consume/%s?timeout=5s&limit=1&auto_ack=true", baseURL, safeTopic)
 		resp, err := http.Get(u)
 		if err != nil {
 			time.Sleep(1 * time.Second)
@@ -302,9 +303,9 @@ func handleTail(baseURL string, args []string) {
 			messages, err := parseMessagesPayload(body)
 			if err == nil && len(messages) > 0 {
 				msg := messages[0]
-				fmt.Printf("%s[%s]%s %s %s->%s %s\n", 
-					colorBlue, msg.Timestamp.Format("15:04:05"), colorReset, 
-					colorBold+colorCyan, msg.ID[:8], colorReset, 
+				fmt.Printf("%s[%s]%s %s %s->%s %s\n",
+					colorBlue, msg.Timestamp.Format("15:04:05"), colorReset,
+					colorBold+colorCyan, msg.ID[:8], colorReset,
 					string(msg.Payload),
 				)
 			}
@@ -326,6 +327,7 @@ func handleBench(baseURL string, args []string) {
 		return
 	}
 	topic := leftover[0]
+	safeTopic := url.PathEscape(topic)
 
 	fmt.Printf("Starting TinyMQ Benchmark...\n")
 	fmt.Printf("Target: %s/publish/%s\n", baseURL, topic)
@@ -341,7 +343,7 @@ func handleBench(baseURL string, args []string) {
 	}
 
 	payload := []byte(`{"event":"bench","data":"stress_test_payload_123456789"}`)
-	
+
 	var successCount int32
 	var failCount int32
 	var wg sync.WaitGroup
@@ -354,7 +356,7 @@ func handleBench(baseURL string, args []string) {
 		go func() {
 			defer wg.Done()
 			for range jobs {
-				url := fmt.Sprintf("%s/publish/%s", baseURL, topic)
+				url := fmt.Sprintf("%s/publish/%s", baseURL, safeTopic)
 				req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payload))
 				req.Header.Set("Content-Type", "application/json")
 
@@ -363,7 +365,7 @@ func handleBench(baseURL string, args []string) {
 					atomic.AddInt32(&failCount, 1)
 					continue
 				}
-				
+
 				io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 
@@ -381,7 +383,7 @@ func handleBench(baseURL string, args []string) {
 	}
 	close(jobs)
 	wg.Wait()
-	
+
 	duration := time.Since(start)
 	msgsPerSec := float64(successCount) / duration.Seconds()
 
@@ -485,7 +487,7 @@ func createTarGzBackup(dataDir string, outTar string) {
 		if err != nil {
 			return err
 		}
-		
+
 		relPath, _ := filepath.Rel(dataDir, path)
 		header.Name = relPath
 
