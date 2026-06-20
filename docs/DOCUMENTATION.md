@@ -13,7 +13,7 @@ TinyMQ uses an append-only `.log` file per topic (Write-Ahead Log):
 - Publishing appends a `PUT` event.
 - Acknowledging appends an `ACK` event.
 
-On startup, the broker replays logs to rebuild the in-memory state of unacknowledged messages. An auto-compaction routine runs on boot to purge confirmed records and free disk space. *Lazy Initialization* ensures that `.log` files are only created when the first message is published, avoiding empty files for manually created topics.
+On startup, the broker replays logs to rebuild the in-memory state of unacknowledged messages. An **Auto-Compaction** background routine (Garbage Collector) runs periodically to purge confirmed records and prevent infinite disk growth. *Lazy Initialization* ensures that `.log` files are only created when the first message is published.
 
 ### Lock-free routing & wildcards
 
@@ -23,6 +23,9 @@ The broker minimizes global `Mutex` contention: the global lock is used only to 
 
 To prevent "poison pill" messages from permanently blocking a work queue, TinyMQ natively supports Dead Letter Queues. If a consumer using the SDK fails to process a message 3 times, the broker automatically isolates it into a `{topic_name}.dlq` queue to keep the main pipeline flowing.
 
+### Strict Disk Durability (FSync)
+For bank-grade reliability, TinyMQ can be configured to force the physical host disk to sync and flush buffers after every single `PUT` or `ACK` operation, protecting data even against sudden power loss.
+
 ### Time-Based Routing (TTL & Delays)
 
 TinyMQ handles time efficiently using *Lazy Expiration*. Expired messages (TTL) are silently dropped and acknowledged on the fly when a consumer attempts to read them. Delayed messages are kept in memory but hidden from consumers until their scheduled delivery time is reached, preventing thread blocking.
@@ -30,6 +33,9 @@ TinyMQ handles time efficiently using *Lazy Expiration*. Expired messages (TTL) 
 ### Graceful shutdown & memory safety
 
 On shutdown (Ctrl+C or `docker stop`) TinyMQ runs `CloseAll()` to flush buffers and close files cleanly. The code also performs explicit nil assignments when discarding messages to avoid GC retention.
+
+### Consumer Groups (Virtual Topic Binding)
+TinyMQ supports Pub/Sub patterns through lightweight Consumer Groups. When a consumer requests a topic with a specific group name (e.g., `?group=emails`), the broker creates a "Virtual Topic" (`topic::emails`) bound to the original. Messages published to the main topic are instantly cloned to all bound virtual topics. This allows multiple independent microservices to consume the same event stream without stealing messages from each other, each maintaining its own independent `.log` file and Dead Letter Queue (DLQ).
 
 ---
 
@@ -40,6 +46,9 @@ You can interact with TinyMQ via `curl`, Go, Python, Node.js, Rust, etc. Payload
 ### Publish a message
 
 **Endpoint:** `POST /publish/{topic}`
+
+**Headers (Optional):**
+- `Idempotency-Key`: A unique string. If a network retry occurs within 5 minutes with the same key, the broker will safely ignore the duplicate and return `200 OK` (status: `ignored`) without duplicating the payload.
 
 **Query Parameters (Optional):**
 - `ttl` (e.g., `30s`, `1h`): Time-To-Live. The message will be destroyed if not consumed within this window.
@@ -69,9 +78,13 @@ curl -X POST "http://127.0.0.1:7800/publish/orders.eu?delay=5s" \
 - `timeout` (e.g., `5s`, `500ms`): How long to hold the connection when the queue is empty (Long-polling).
 - `auto_ack` (`true`/`false`): If `true`, the message is marked processed and removed immediately.
 - `limit` (e.g., `10`): Batching/Prefetch. Extracts up to `X` messages in a single network call.
+- `group` (e.g., `emails`, `invoices`): Enables **Consumer Groups** (Pub/Sub). Binds a virtual sub-queue so multiple independent services can read the same message stream without competing for the same payload.
 
 ```bash
-curl -X GET "http://127.0.0.1:7800/consume/orders.*?limit=5&auto_ack=true&timeout=10s"
+# Worker 1 (Email Service)
+curl -X GET "http://127.0.0.1:7800/consume/orders.eu?group=emails&timeout=10s"
+# Worker 2 (Invoice Service)
+curl -X GET "http://127.0.0.1:7800/consume/orders.eu?group=invoices&timeout=10s"
 ```
 
 **Response (200):**
@@ -98,6 +111,25 @@ If `limit=1` (Default), returns a single JSON object. If `limit > 1`, returns a 
   "message": "No messages in topic"
 }
 ```
+### Live Streaming (Server-Sent Events)
+
+**Endpoint:** `GET /stream/{topic}`
+
+Opens a persistent HTTP/1.1 chunked connection. Messages published to the topic will be streamed to the client in real-time. This is a **"Spy Mode"** (non-destructive) and does not dequeue the message from actual workers.
+
+```bash
+curl -N "[http://127.0.0.1:7800/stream/orders.eu](http://127.0.0.1:7800/stream/orders.eu)"
+```
+
+### Observability & Metrics (Prometheus)
+
+**Endpoint:** `GET /metrics`
+Returns broker statistics (RAM messages, waiting consumers, total webhooks) formatted natively for Prometheus scraping, requiring 0 external agents.
+
+```bash
+curl "[http://127.0.0.1:7800/metrics](http://127.0.0.1:7800/metrics)"
+```
+
 
 ### Register a Webhook (Push Consumers)
 
@@ -206,6 +238,16 @@ tmq peek <topic>
 
 # Watch a topic in real time
 tmq tail <topic>
+
+# Run a high-concurrency stress test against the broker
+tmq bench <topic> --total=50000 --concurrency=100
+
+# Safely compress active WAL (.log) files for easy state migrations (TAR)
+tmq backup --format=tar
+
+# Safely compress active WAL (.log) files for easy state migrations (ZIP)
+tmq backup --format=zip
+
 ```
 
 ---
@@ -275,7 +317,7 @@ func main() {
 ### System Limits & Security
 To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
 - **Max Payload Size:** `2 MB` per HTTP request. Exceeding this limit will safely abort the connection and return an `HTTP 413 Request Entity Too Large` error.
-- **Max Queue Capacity (Backpressure):** `100,000` messages per topic in RAM. If consumers are offline and a queue reaches this limit, the broker will reject new messages with an `HTTP 429 Too Many Requests` error to protect the host's memory.
+- **Max Queue Capacity:** Configurable via `TINYMQ_MAX_MESSAGES` (Default: `100,000`). Controls the memory footprint per topic. When exceeded, the broker follows the `TINYMQ_DEFAULT_POLICY` (reject or drop-oldest).
 
 ---
 
@@ -298,6 +340,9 @@ docker run -d \
 ### Environment variables
 
 - `PORT`: HTTP listening port (default `7800`).
+- `TINYMQ_FSYNC`: Set to `true` to force physical disk flushes (Bank-grade durability).
+- `TINYMQ_COMPACT_INTERVAL`: Background WAL garbage collector interval (default `10m`).
+- `TINYMQ_DEFAULT_POLICY`: Defines memory behavior when a queue hits its 100,000 limit. Set to `reject` (returns HTTP 429) or `drop-oldest` (acts as a Ring Buffer, evicting the oldest message to accommodate new ones).
 
 ### Persistent data (Docker Compose)
 
@@ -307,10 +352,10 @@ TinyMQ writes WAL `.log` files into `./data`. In Docker Compose, mount this path
 services:
   tinymq:
     image: ghcr.io/x-name15/tinymq:latest
-    environment:
-      - PORT=7800
+    env_file:
+      - .env
     ports:
-      - "7800:7800"
+      - "${PORT:-7800}:7800"
     volumes:
       - ./data:/root/data
     restart: unless-stopped

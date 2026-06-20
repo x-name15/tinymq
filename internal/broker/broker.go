@@ -1,18 +1,21 @@
 package broker
 
 import (
-	"log"
-	"errors"
 	"bytes"
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
-	"regexp"
-	"strings"
-	
+
+	"github.com/x-name15/tinymq/internal/helper"
 	"github.com/x-name15/tinymq/internal/message"
 	"github.com/x-name15/tinymq/internal/storage"
-	"github.com/x-name15/tinymq/internal/helper"
 )
 
 type Topic struct {
@@ -20,6 +23,7 @@ type Topic struct {
 	Messages         []message.Message
 	waitingConsumers []chan message.Message
 	spies            []chan message.Message
+	Policy 			 string
 	mu               sync.Mutex
 }
 
@@ -31,6 +35,7 @@ type Broker struct {
 	webhooks      	map[string][]string
 	webhookClient 	*http.Client
 	idempotencyKeys map[string]time.Time
+	bindings        map[string]map[string]bool
 }
 
 type TopicStat struct {
@@ -41,9 +46,7 @@ type TopicStat struct {
 	HasWebhooks     bool
 }
 
-const MaxMessagesPerTopic = 100000
-
-var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
 
 func New(store *storage.DiskStorage) *Broker {
 	return &Broker{
@@ -53,11 +56,37 @@ func New(store *storage.DiskStorage) *Broker {
 		webhooks:      	 make(map[string][]string),
 		webhookClient: 	 &http.Client{Timeout: 10 * time.Second},
 		idempotencyKeys: make(map[string]time.Time),
+		bindings:        make(map[string]map[string]bool),
 	}
 }
 
+func getMaxMessages() int {
+    val := os.Getenv("TINYMQ_MAX_MESSAGES")
+    if limit, err := strconv.Atoi(val); err == nil && limit > 0 {
+        return limit
+    }
+    return 100000 
+}
+
 func (b *Broker) LoadExistingTopics(topicNames []string) {
+	defaultPolicy := os.Getenv("TINYMQ_DEFAULT_POLICY")
+	if defaultPolicy != "drop-oldest" {
+		defaultPolicy = "reject"
+	}
+
 	for _, name := range topicNames {
+		if strings.Contains(name, "::") {
+			parts := strings.SplitN(name, "::", 2)
+			sourceTopic := parts[0]
+			
+			b.mu.Lock()
+			if b.bindings[sourceTopic] == nil {
+				b.bindings[sourceTopic] = make(map[string]bool)
+			}
+			b.bindings[sourceTopic][name] = true
+			b.mu.Unlock()
+		}
+		
 		msgs, err := b.storage.LoadMessages(name)
 		if err != nil {
 			log.Printf("Failed to recover topic %s: %v\n", name, err)
@@ -68,6 +97,7 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 		b.Topics[name] = &Topic{
 			Name:     name,
 			Messages: msgs, 
+			Policy:   defaultPolicy,
 		}
 		b.mu.Unlock()
 
@@ -85,9 +115,28 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		return errors.New("invalid topic name")
 	}
 
+	if !strings.Contains(topicName, "::") {
+		b.mu.RLock()
+		var boundTopics []string
+		if b.bindings != nil && b.bindings[topicName] != nil {
+			for vTopic := range b.bindings[topicName] {
+				boundTopics = append(boundTopics, vTopic)
+			}
+		}
+		b.mu.RUnlock()
+
+		for _, dest := range boundTopics {
+			b.Publish(dest, payload, expiresAt, deliverAt, isBroadcast)
+		}
+	}
+
 	b.mu.Lock()
 	if _, exists := b.Topics[topicName]; !exists {
-		b.Topics[topicName] = &Topic{Name: topicName}
+		policy := os.Getenv("TINYMQ_DEFAULT_POLICY")
+		if policy != "drop-oldest" {
+			policy = "reject"
+		}
+		b.Topics[topicName] = &Topic{Name: topicName, Policy: policy}
 	}
 	t := b.Topics[topicName]
 
@@ -187,8 +236,20 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		return nil
 	}
 
-	if len(t.Messages) >= MaxMessagesPerTopic {
-		return errors.New("queue capacity reached (max 100,000 messages)")
+	if len(t.Messages) >= getMaxMessages() {
+		if t.Policy == "drop-oldest" {
+			oldestMsg := t.Messages[0]
+			t.Messages = t.Messages[1:]
+			
+			if b.storage != nil {
+				if err := b.storage.AppendAck(topicName, oldestMsg.ID); err != nil {
+					log.Printf("Eviction ACK logging failed: %v\n", err)
+				}
+			}
+			log.Printf("[RingBuffer] Queue '%s' full. Evicted oldest message: %s\n", topicName, oldestMsg.ID)
+		} else {
+			return errors.New("queue capacity reached (max 100,000 messages)")
+		}
 	}
 
 	t.Messages = append(t.Messages, msg)
@@ -199,7 +260,7 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		default:
 		}
 	}
-	
+
 	return nil
 }
 
@@ -414,7 +475,7 @@ func (b *Broker) RegisterWebhook(topic, callbackURL string) {
 	log.Printf("Registered Webhook for topic '%s' -> %s\n", topic, callbackURL)
 }
 
-func (b *Broker) CreateTopic(topicName string) error {
+func (b *Broker) CreateTopic(topicName string, policy string) error {
 	if len(topicName) == 0 || len(topicName) > 255 {
 		return errors.New("Invalid name length (1-255 characters)")
 	}
@@ -430,8 +491,12 @@ func (b *Broker) CreateTopic(topicName string) error {
 		return errors.New("The Topic already exists")
 	}
 
-	b.Topics[topicName] = &Topic{Name: topicName}
-	log.Printf("Created Topic '%s' manually via API/Dashboard\n", topicName)
+	if policy != "drop-oldest" {
+		policy = "reject"
+	}
+
+	b.Topics[topicName] = &Topic{Name: topicName, Policy: policy}
+	log.Printf("Created Topic '%s' manually via API/Dashboard with policy '%s'\n", topicName, policy)
 	return nil
 }
 
@@ -581,4 +646,22 @@ func (b *Broker) RemoveSpy(topicName string, ch chan message.Message) {
 			break
 		}
 	}
+}
+
+func (b *Broker) CreateGroup(topicName, groupName string) string {
+	virtualName := fmt.Sprintf("%s::%s", topicName, groupName)
+	
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	
+	if b.bindings[topicName] == nil {
+		b.bindings[topicName] = make(map[string]bool)
+	}
+	b.bindings[topicName][virtualName] = true
+
+	if _, exists := b.Topics[virtualName]; !exists {
+		b.Topics[virtualName] = &Topic{Name: virtualName}
+	}
+	
+	return virtualName
 }

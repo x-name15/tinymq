@@ -14,15 +14,20 @@ TinyMQ offers a true "plug & play" alternative to heavy brokers like RabbitMQ or
 
 ## Key Features
 
-- **Zero Dependencies:** Pure Go implementation under ~15MB.
-- **Smart Disk Persistence (WAL):** Messages are persisted to an append-only `.log` file per topic and kept in RAM for fast reads.
-- **Dead Letter Queues (DLQ):** Automatically isolates "poison pill" messages after 3 failed retries to protect your workers.
-- **Time-Based Routing (TTL & Delay):** Schedule delayed messages for the future or set expiration times natively.
-- **Batching & Prefetch:** Consume multiple messages in a single HTTP call (`?limit=X`) to drastically reduce network overhead.
-- **Broadcast / Fan-out:** Ephemeral pub/sub support to dispatch a single event to multiple independent consumers simultaneously.
+- **Zero Dependencies:** Pure Go implementation under ~15MB. Extremely low RAM and CPU footprint.
+- **Consumer Groups (Pub/Sub):** Multiple microservices can read the same event stream independently via Virtual Topic Binding (`?group=name`) without competing for payloads.
+- **Smart Disk Persistence & GC:** Append-only Write-Ahead Log (`.log`) architecture with a background Auto-Compactor (Garbage Collector) to prevent infinite disk growth.
+- **Strict Durability (FSync):** Configurable bank-grade physical disk flushing after every operation to protect against sudden power loss.
+- **Live Streaming (SSE):** Real-time, non-destructive topic monitoring (`GET /stream`) utilizing native Server-Sent Events.
+- **Dead Letter Queues (DLQ):** Automatically isolates "poison pill" messages after 3 failed retries to keep your main pipelines flowing.
+- **Time-Based Routing:** Schedule delayed messages for the future or set expiration times natively (TTL).
+- **Network Idempotency:** Caches `Idempotency-Key` headers to safely ignore duplicate publish requests caused by network retries.
+- **Batching & Prefetch:** Pull multiple messages in a single HTTP call (`?limit=X`) to drastically reduce network overhead.
 - **Push Consumers (Webhooks):** Passive integration. Let the broker `POST` directly to your external endpoints.
-- **Graceful Shutdown:** Syncs OS-level buffers to disk on `SIGTERM`/`SIGINT` to prevent data loss.
-- **Interactive UI:** Built-in interactive Dashboard (No JS frameworks) to monitor uptime, webhooks, and active topics.
+- **Native Observability:** Built-in `/metrics` endpoint formatted natively for Prometheus scraping, requiring zero external agents.
+- **Interactive UI & CLI Tool:** Built-in web Dashboard to monitor queues visually, and a native terminal CLI (`tmq`) for management, offline backups, and high-concurrency stress testing (`bench`).
+- **Graceful Shutdown:** Safely flushes OS-level buffers to disk on `SIGTERM`/`SIGINT` to prevent data loss.
+- **Plug & Play Configuration:** Auto-loads `.env` files dynamically. No complex XML/YAML configuration files required.
 
 ## Why use TinyMQ? 
 

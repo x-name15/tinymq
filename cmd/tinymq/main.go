@@ -110,6 +110,10 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	}
 	topic := parts[2]
 
+	if group := r.URL.Query().Get("group"); group != "" {
+		topic = s.broker.CreateGroup(topic, group)
+	}
+
 	timeoutStr := r.URL.Query().Get("timeout")
 	var timeout time.Duration
 	if timeoutStr != "" {
@@ -303,7 +307,8 @@ func (s *Server) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload struct {
-		Name string `json:"name"`
+		Name   string `json:"name"`
+		Policy string `json:"policy"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -312,7 +317,11 @@ func (s *Server) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	if err := s.broker.CreateTopic(payload.Name); err != nil {
+	if payload.Policy == "" {
+		payload.Policy = os.Getenv("TINYMQ_DEFAULT_POLICY")
+	}
+
+	if err := s.broker.CreateTopic(payload.Name, payload.Policy); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}

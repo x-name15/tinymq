@@ -3,6 +3,25 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+
+---
+## [2.3.0] - 2026-06-20 — Pub/Sub, Bounded Queues & Configurable Limits
+
+## Added
+- **Consumer Groups (Virtual Topic Binding):** Implemented a lock-free Pub/Sub architecture. 
+  - Clients can now consume from a topic using the `?group={name}` query parameter. 
+  - The broker dynamically creates a virtual sub-queue (e.g., `topic::group`) bound to the main topic.
+  - Messages published to the root topic are instantly cloned and routed to all registered group queues. 
+  - This allows multiple independent microservices to read the exact same event stream at their own pace without competing for messages, each maintaining its own isolated `.log` file and Dead Letter Queue (DLQ) state.
+- **Ring Buffers (Memory Eviction Policies):** Introduced bounded queue controls.
+  - New environment variable `TINYMQ_DEFAULT_POLICY` (options: `reject` or `drop-oldest`).
+  - When a topic hits its message limit, `drop-oldest` discards the oldest message (performing an automatic ACK in the WAL) to make room for incoming traffic without disrupting publishers.
+- **Configurable System Limits:** Added `TINYMQ_MAX_MESSAGES` to allow custom RAM footprint per broker instance (Default: 100,000).
+
+## Refactored
+- **Topic Naming Validation:** Updated regex validation to support `::` characters, enabling support for virtual consumer groups while maintaining strict security against injection.
+- **Internal Storage API:** The `storage.New` function now accepts durability parameters directly, centralizing the configuration of the disk write-ahead log.
+
 ---
 ## [2.2.0] - 2026-06-20 — Observability, CLI - Backups, Streaming  & Resilience Update
 
