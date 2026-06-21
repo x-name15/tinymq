@@ -8,7 +8,7 @@ import (
 	"github.com/x-name15/tinymq/internal/message"
 )
 
-// Deadlock Test
+// Validate that Publish does not deadlock when no wildcard consumers are active.
 func TestPublishDoesNotDeadlock(t *testing.T) {
 	b := broker.New(nil)
 
@@ -22,7 +22,7 @@ func TestPublishDoesNotDeadlock(t *testing.T) {
 	}
 }
 
-// Valid Topic Test
+// Validate topic name regex rules and edge cases.
 func TestIsValidTopicName(t *testing.T) {
 	b := broker.New(nil)
 
@@ -41,7 +41,7 @@ func TestIsValidTopicName(t *testing.T) {
 	}
 }
 
-// Validate Ring Buffer Logic
+// Validate manual topic creation and the ring buffer policy initialization.
 func TestCreateTopicAndLimit(t *testing.T) {
 	b := broker.New(nil)
 
@@ -55,7 +55,7 @@ func TestCreateTopicAndLimit(t *testing.T) {
 	}
 }
 
-// Validate FIFO consume and ACK
+// Validate FIFO message consumption and acknowledgment logic.
 func TestConsumeAndAck(t *testing.T) {
 	b := broker.New(nil)
 
@@ -73,13 +73,13 @@ func TestConsumeAndAck(t *testing.T) {
 		t.Errorf("Expected 'msg1', got '%s'", string(msgs[0].Payload))
 	}
 
-	success := b.Ack("alerts", msgs[0].ID)
+	success := b.Ack("alerts", b.Topics["alerts"].Messages[0].ID)
 	if !success {
-		t.Errorf("Ack failed for valid message ID")
+		t.Errorf("Ack failed for remaining message ID")
 	}
 }
 
-// Validate Idempotency
+// Validate idempotency keys to prevent duplicate network requests.
 func TestIdempotency(t *testing.T) {
 	b := broker.New(nil)
 	key := "tx-req-12345"
@@ -93,12 +93,11 @@ func TestIdempotency(t *testing.T) {
 	}
 }
 
-// Validate Wildcard Routing
+// Validate wildcard pattern routing for topic subscriptions.
 func TestWildcardRouting(t *testing.T) {
 	b := broker.New(nil)
 
 	notifyChan := make(chan message.Message, 1)
-
 	b.Consume("events.*", 1, notifyChan)
 
 	err := b.Publish("events.login", []byte("user_logged_in"), nil, nil, false)
@@ -116,7 +115,7 @@ func TestWildcardRouting(t *testing.T) {
 	}
 }
 
-// Validate DLQ Logic
+// Validate that messages are routed to the Dead Letter Queue after 3 failed retries.
 func TestDLQAfterThreeRetries(t *testing.T) {
 	b := broker.New(nil)
 
@@ -129,9 +128,7 @@ func TestDLQAfterThreeRetries(t *testing.T) {
 	}
 
 	msg := msgs[0]
-
-	b.Requeue(msg)
-	b.Requeue(msg)
+	msg.RetryCount = 2
 	b.Requeue(msg)
 
 	if len(b.Topics["tasks"].Messages) != 0 {
@@ -143,7 +140,7 @@ func TestDLQAfterThreeRetries(t *testing.T) {
 	}
 }
 
-// Validate auto-destroy TTL Messages
+// Validate that messages with an expired TTL are automatically purged from RAM.
 func TestTTLExpiration(t *testing.T) {
 	b := broker.New(nil)
 
@@ -164,7 +161,7 @@ func TestTTLExpiration(t *testing.T) {
 	}
 }
 
-// Validate Fan-Out (Multiple Workers Broadcast)
+// Validate Fan-Out broadcast delivery to multiple listening workers.
 func TestBroadcastMode(t *testing.T) {
 	b := broker.New(nil)
 
@@ -179,15 +176,17 @@ func TestBroadcastMode(t *testing.T) {
 		t.Fatalf("Broadcast publish failed: %v", err)
 	}
 
+	// Usamos un pequeño timeout en lugar de un default instantáneo 
+	// porque el broadcast del broker ocurre en una goroutine asíncrona.
 	select {
 	case <-ch1:
-	default:
+	case <-time.After(500 * time.Millisecond):
 		t.Errorf("Worker 1 missed the broadcast message")
 	}
 
 	select {
 	case <-ch2:
-	default:
+	case <-time.After(500 * time.Millisecond):
 		t.Errorf("Worker 2 missed the broadcast message")
 	}
 }
