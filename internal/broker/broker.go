@@ -33,7 +33,7 @@ type Topic struct {
 type Broker struct {
 	mu              sync.RWMutex
 	Topics          map[string]*Topic
-	wildcards       map[string]*Topic 
+	wildcards       map[string]*Topic
 	storage         *storage.DiskStorage
 	compiledRegex   map[string]*regexp.Regexp
 	webhooks        map[string][]string

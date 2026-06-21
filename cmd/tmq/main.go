@@ -59,11 +59,11 @@ func doAuthRequest(method, urlStr string, body io.Reader) (*http.Response, error
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	
+
 	if apiKey := os.Getenv("TINYMQ_API_KEY"); apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	
+
 	client := &http.Client{}
 	return client.Do(req)
 }

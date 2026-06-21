@@ -11,7 +11,7 @@ import (
 // Deadlock Test
 func TestPublishDoesNotDeadlock(t *testing.T) {
 	b := broker.New(nil)
-	
+
 	err := b.Publish("orders", []byte("hello"), nil, nil, false)
 	if err != nil {
 		t.Fatalf("Publish returned an error: %v", err)
@@ -41,10 +41,10 @@ func TestIsValidTopicName(t *testing.T) {
 	}
 }
 
-// Validate Ring Buffer Logic 
+// Validate Ring Buffer Logic
 func TestCreateTopicAndLimit(t *testing.T) {
 	b := broker.New(nil)
-	
+
 	err := b.CreateTopic("sensor.data", "reject")
 	if err != nil {
 		t.Fatalf("Failed to create topic: %v", err)
@@ -55,7 +55,7 @@ func TestCreateTopicAndLimit(t *testing.T) {
 	}
 }
 
-// Validate FIFO consume and ACK 
+// Validate FIFO consume and ACK
 func TestConsumeAndAck(t *testing.T) {
 	b := broker.New(nil)
 
@@ -79,7 +79,7 @@ func TestConsumeAndAck(t *testing.T) {
 	}
 }
 
-// Validate Idempotency 
+// Validate Idempotency
 func TestIdempotency(t *testing.T) {
 	b := broker.New(nil)
 	key := "tx-req-12345"
@@ -116,7 +116,7 @@ func TestWildcardRouting(t *testing.T) {
 	}
 }
 
-// Validate DLQ Logic 
+// Validate DLQ Logic
 func TestDLQAfterThreeRetries(t *testing.T) {
 	b := broker.New(nil)
 
@@ -130,9 +130,9 @@ func TestDLQAfterThreeRetries(t *testing.T) {
 
 	msg := msgs[0]
 
-	b.Requeue(msg) 
-	b.Requeue(msg) 
-	b.Requeue(msg) 
+	b.Requeue(msg)
+	b.Requeue(msg)
+	b.Requeue(msg)
 
 	if len(b.Topics["tasks"].Messages) != 0 {
 		t.Errorf("Message should have been removed from the original topic")
@@ -143,10 +143,10 @@ func TestDLQAfterThreeRetries(t *testing.T) {
 	}
 }
 
-// Validate auto-destroy TTL Messages 
+// Validate auto-destroy TTL Messages
 func TestTTLExpiration(t *testing.T) {
 	b := broker.New(nil)
-	
+
 	now := time.Now()
 	expiredTime := now.Add(-1 * time.Minute)
 
