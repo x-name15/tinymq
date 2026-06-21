@@ -1,4 +1,4 @@
-name: TinyMQ CI Pipeline
+name: TinyMQ CI / Release Gate
 
 on:
   push:
@@ -16,8 +16,8 @@ jobs:
     - name: Setup Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.23' 
-        cache: true
+        go-version-file: 'go.mod'
+        cache: false
 
     - name: Verify Code Formatting
       run: |
@@ -31,11 +31,37 @@ jobs:
     - name: Run Go Vet (Static Analysis)
       run: go vet ./...
 
+    - name: Run Tests (Race Detector)
+      run: go test -race -timeout 30s ./...
+
     - name: Build TinyMQ Binary
       run: CGO_ENABLED=0 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
       
     - name: Build CLI Binary
       run: CGO_ENABLED=0 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+    
+    - name: Verify Docker Image Size
+      run: |
+        echo "Building Docker image for size verification..."
+        docker build -t tinymq:ci-check .
+        
+        echo ""
+        echo "DOCKER IMAGE SIZE REPORT:"
+        docker images tinymq:ci-check
+        
+        SIZE_BYTES=$(docker inspect -f "{{ .Size }}" tinymq:ci-check)
+        SIZE_MB=$(awk "BEGIN {printf \"%.2f\", ${SIZE_BYTES}/1048576}")
+        
+        echo ""
+        echo "Calculated Size: ${SIZE_MB} MB"
+        
+        if awk "BEGIN {exit (${SIZE_MB} > 25.0 ? 0 : 1)}"; then
+          echo "ERROR: The Docker image (${SIZE_MB} MB) exceeded the strict 25MB limit!"
+          echo "Please check for unnecessary dependencies or missing stripped binaries."
+          exit 1
+        fi
+        
+        echo "SUCCESS: Image size is within the allowed limits."
 
     - name: Docker Build Check
       run: docker build -t tinymq:test .

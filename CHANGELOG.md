@@ -3,6 +3,28 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.5.1] - 2026-06-20 — More Fixes
+
+## Fixed
+- **Deadlock in Publish (Regression):** Fixed a critical race condition regression introduced in v2.5.0 where `Publish()` would permanently deadlock the topic mutex if no wildcard consumers were actively waiting. Removed the duplicate `t.mu.Lock()` acquisition.
+- **CLI and SDK Authentication Gap:** Closed a functionality gap where the `client` SDK and the `tmq` CLI lacked support for passing the `Authorization` header. `client.NewClient` now optionally accepts an API key, and the CLI natively reads the `TINYMQ_API_KEY` environment variable to securely authenticate all commands against protected brokers.
+
+## Security
+- **Unprotected Metrics Endpoint:** Secured the `/api/stats` endpoint. It now correctly implements the `withAuth` middleware, preventing unauthorized telemetry scraping when `TINYMQ_API_KEY` is configured.
+- **Residual XSS in Dashboard (CWE-79):** Fixed an incomplete XSS mitigation in the `peekQueue` modal. The "Copy" button previously used inline `onclick` string interpolation, which could be bypassed via payload manipulation. It now utilizes memory-based payload arrays and delegated event listeners, strictly preventing arbitrary code execution in the browser.
+- **DNS Rebinding in Webhooks (CWE-298):** Resolved a Time-of-Check to Time-of-Use (TOCTOU) vulnerability where a webhook domain could be verified as external but instantly re-routed to an internal IP before the request was sent. The `Broker` now utilizes a custom `DialContext` to resolve and block local/private IPs milliseconds before establishing the TCP connection.
+
+## Performance
+- **Global Mutex Contention in Consume:** Radically reduced global lock blocking during wildcard topic consumption. `Consume()` now drops the global `b.mu` read lock before extracting messages and performing disk I/O, preventing high-volume wildcard listeners from paralyzing the rest of the broker.
+- **Publish O(N) Wildcard Search Bottleneck:** Optimized `Publish()` routing logic. Instead of scanning every active topic to find matching wildcard listeners (an `O(N)` operation), the broker now maintains a specialized `wildcards` map (`O(1)` indexing), achieving predictable publish latency regardless of total queue count.
+- **Dashboard Auto-Refresh Flicker:** Upgraded the embedded UI's Auto-Refresh system. It now utilizes a silent `DOMParser` fetch routine instead of `location.reload()`, enabling smooth, flicker-free telemetry updates without resetting user scroll or inputs.
+
+## Quality & CI/CD
+- **Synchronized Workflows:** Linked the `release.yaml` and `ci.yaml` GitHub Actions. Releases and Docker image builds will now only trigger if the CI pipeline passes successfully.
+- **Unified Go Toolchain:** Resolved Go version mismatches across the repository. CI and Release workflows now dynamically read the required toolchain directly from `go.mod` via `go-version-file`.
+- **Documentation Accuracy:** Updated `DOCUMENTATION.md` to reflect the new `context.Context` signature in the SDK's `Subscribe` method, and added security notes regarding volume permissions (`chown 10001:10001`) for Docker bind-mounts.
+- **Binary Checksums (Integrity Verification):** Upgraded the GitHub Actions release pipeline. All release assets (Windows, Linux, macOS bundles and source archives) now automatically generate and publish a `SHA-256` checksum file to cryptographically verify binary integrity.
+- **Automated Testing & Race Detection:** Addressed the root cause of regression bugs by establishing the project's first automated test suite (`broker_test.go`). The CI pipeline (`ci.yaml`) now strictly enforces `go test -race -timeout 30s ./...` on every push and PR, ensuring that deadlocks or concurrency regressions are caught before they can be merged or released.
 
 ## [2.5.0] - 2026-06-20 — Major Fixes and Stability Update
 

@@ -1,13 +1,17 @@
-name: Release TinyMQ
+name: Release a new version of TinyMQ Pipeline
 
 on:
-  push:
+  workflow_run:
+    workflows: ["TinyMQ CI / Release Gate"]
+    types:
+      - completed
     branches:
       - main
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: write
       packages: write
@@ -21,7 +25,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26' 
+          go-version-file: 'go.mod' 
           
       - name: Get version from CHANGELOG
         id: version
@@ -64,31 +68,36 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
 
           # Windows (Zip Bundle)
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o tinymq.exe ./cmd/tinymq
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o tmq.exe ./cmd/tmq
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o tinymq.exe ./cmd/tinymq
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o tmq.exe ./cmd/tmq
           zip -q dist/tinymq-${VERSION}-windows-amd64.zip tinymq.exe tmq.exe
           rm tinymq.exe tmq.exe
 
           # Linux AMD64 (Tar.gz Bundle)
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
           tar -czf dist/tinymq-${VERSION}-linux-amd64.tar.gz tinymq tmq
           rm tinymq tmq
 
           # macOS Intel (Tar.gz Bundle)
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
           tar -czf dist/tinymq-${VERSION}-darwin-amd64.tar.gz tinymq tmq
           rm tinymq tmq
 
           # macOS Apple Silicon (Tar.gz Bundle)
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
           tar -czf dist/tinymq-${VERSION}-darwin-arm64.tar.gz tinymq tmq
           rm tinymq tmq
 
           # Source Code Zip
           git archive --format=zip -o dist/tinymq-source-${VERSION}.zip HEAD
+
+          #Generate SHA-256 signatures
+          cd dist
+          sha256sum * > tinymq-${VERSION}-checksums.txt
+          cd ..
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

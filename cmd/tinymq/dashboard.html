@@ -344,13 +344,35 @@
         let isModalOpen = false;
         let currentEventSource = null;
 
-        const manageRefresh = () => {
+        async function fetchStatsAndUpdate() {
+            if (isModalOpen) return;
+            try {
+                const htmlRes = await fetch('/dashboard');
+                if (!htmlRes.ok) return;
+                const htmlText = await htmlRes.text();
+
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(htmlText, 'text/html');
+                
+                document.querySelector('.metrics-grid').innerHTML = doc.querySelector('.metrics-grid').innerHTML;
+                document.querySelector('#topicsTable tbody').innerHTML = doc.querySelector('#topicsTable tbody').innerHTML;
+                
+            } catch (e) {
+                console.error("Auto-refresh failed", e);
+            }
+            
             if (toggle.checked && !isModalOpen) {
-                refreshInterval = setTimeout(() => location.reload(), 3000);
-            } else {
-                clearTimeout(refreshInterval);
+                refreshInterval = setTimeout(fetchStatsAndUpdate, 3000);
+            }
+        }
+
+        const manageRefresh = () => {
+            clearTimeout(refreshInterval);
+            if (toggle.checked && !isModalOpen) {
+                refreshInterval = setTimeout(fetchStatsAndUpdate, 3000);
             }
         };
+
         toggle.addEventListener('change', (e) => {
             localStorage.setItem('tinymq_autorefresh', e.target.checked);
             manageRefresh();
@@ -396,6 +418,13 @@
         }
 
         let currentTargetQueue = "";
+        let peekRawPayloads = [];
+
+        document.getElementById('peekOutput').addEventListener('click', (e) => {
+            if (e.target.matches('.copy-btn')) {
+                copyRawText(peekRawPayloads[Number(e.target.dataset.idx)]);
+            }
+        });
 
         function escapeHtml(s) {
             if (!s) return "";
@@ -525,16 +554,18 @@
                     return;
                 }
                 
+                peekRawPayloads = []; 
                 let html = "";
                 messages.forEach((msg, index) => {
                     let rawStr = atob(msg.payload);
                     let displayPayload = rawStr;
                     try { displayPayload = JSON.stringify(JSON.parse(rawStr), null, 2); } catch(e) {}
-                    let safePayload = displayPayload.replace(/"/g, '&quot;').replace(/'/g, "\\'");
+
+                    const idx = peekRawPayloads.push(displayPayload) - 1;
 
                     html += `
                     <div class="peek-msg-card">
-                        <button class="copy-btn" onclick="copyRawText('${safePayload}')">Copy</button>
+                        <button class="copy-btn" data-idx="${idx}">Copy</button>
                         <span style="color:#4db8ff; font-weight:bold;">#${index + 1} | ID: ${msg.id}</span>
                         <hr style="border-color: #2d3748; margin: 8px 0;">
                         ${escapeHtml(displayPayload)}

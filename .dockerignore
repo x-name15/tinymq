@@ -21,3 +21,7 @@ bin/
 cmd/tmq/
 tmq
 tmq.exe
+
+# Ignore tests to keep the build context clean and optimize cache
+internal/tests/
+*_test.go

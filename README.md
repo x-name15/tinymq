@@ -63,6 +63,11 @@ TinyMQ solves the "over-engineering" problem. It is built for developers who nee
 
 ## Quick Start (Docker)
 
+> **Permissions Note:** TinyMQ runs as a secure, unprivileged user (`UID 10001`). If you are bind-mounting a local directory like `./data`, ensure the container has write permissions to it before starting:
+> ```bash
+> mkdir -p ./data && sudo chown -R 10001:10001 ./data
+> ```
+
 ### 1.- Create your environment file (Optional but recommended)
 
 Create a `.env` file in your current directory to configure security and limits. You can use the provided `.env.example` as a base.

@@ -2,9 +2,11 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -31,6 +33,7 @@ type Topic struct {
 type Broker struct {
 	mu              sync.RWMutex
 	Topics          map[string]*Topic
+	wildcards       map[string]*Topic 
 	storage         *storage.DiskStorage
 	compiledRegex   map[string]*regexp.Regexp
 	webhooks        map[string][]string
@@ -50,12 +53,40 @@ type TopicStat struct {
 var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
 
 func New(store *storage.DiskStorage) *Broker {
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	secureTransport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr
+			}
+			_ = port
+
+			ips, err := net.LookupIP(host)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, ip := range ips {
+				if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+					return nil, errors.New("DNS rebinding blocked: target resolved to an internal IP at dial time")
+				}
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
+
 	return &Broker{
 		Topics:          make(map[string]*Topic),
+		wildcards:       make(map[string]*Topic),
 		storage:         store,
 		compiledRegex:   make(map[string]*regexp.Regexp),
 		webhooks:        make(map[string][]string),
-		webhookClient:   &http.Client{Timeout: 10 * time.Second},
+		webhookClient:   &http.Client{Timeout: 10 * time.Second, Transport: secureTransport},
 		idempotencyKeys: make(map[string]time.Time),
 		bindings:        make(map[string]map[string]bool),
 	}
@@ -103,10 +134,14 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 		}
 
 		b.mu.Lock()
-		b.Topics[name] = &Topic{
+		t := &Topic{
 			Name:     name,
 			Messages: msgs,
 			Policy:   defaultPolicy,
+		}
+		b.Topics[name] = t
+		if strings.Contains(name, "*") {
+			b.wildcards[name] = t
 		}
 		b.mu.Unlock()
 
@@ -150,26 +185,28 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		if policy != "drop-oldest" {
 			policy = "reject"
 		}
-		b.Topics[topicName] = &Topic{Name: topicName, Policy: policy}
+		t := &Topic{Name: topicName, Policy: policy}
+		b.Topics[topicName] = t
+		if strings.Contains(topicName, "*") {
+			b.wildcards[topicName] = t
+		}
 	}
 	t := b.Topics[topicName]
 
 	var matchingWildcards []*Topic
-	for name, wildcardT := range b.Topics {
-		if strings.Contains(name, "*") {
-			reg, exists := b.compiledRegex[name]
-			if !exists {
-				regexPattern := "^" + strings.ReplaceAll(name, "*", ".*") + "$"
-				compiled, err := regexp.Compile(regexPattern)
-				if err != nil {
-					continue
-				}
-				reg = compiled
-				b.compiledRegex[name] = reg
+	for name, wildcardT := range b.wildcards {
+		reg, exists := b.compiledRegex[name]
+		if !exists {
+			regexPattern := "^" + strings.ReplaceAll(name, "*", ".*") + "$"
+			compiled, err := regexp.Compile(regexPattern)
+			if err != nil {
+				continue
 			}
-			if reg != nil && reg.MatchString(topicName) {
-				matchingWildcards = append(matchingWildcards, wildcardT)
-			}
+			reg = compiled
+			b.compiledRegex[name] = reg
+		}
+		if reg != nil && reg.MatchString(topicName) {
+			matchingWildcards = append(matchingWildcards, wildcardT)
 		}
 	}
 	b.mu.Unlock()
@@ -249,9 +286,6 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		}
 		wildcardT.mu.Unlock()
 	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	if len(t.waitingConsumers) > 0 {
 		consumerChan := t.waitingConsumers[0]
@@ -333,7 +367,8 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 				b.mu.Unlock()
 				return nil, false
 			}
-			b.Topics[topicName] = &Topic{Name: topicName}
+			t := &Topic{Name: topicName}
+			b.Topics[topicName] = t
 		}
 		t := b.Topics[topicName]
 		b.mu.Unlock()
@@ -362,25 +397,33 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 		b.compiledRegex[topicName] = reg
 	}
 
+	var matchingTopics []*Topic
 	for name, t := range b.Topics {
 		if reg != nil && reg.MatchString(name) {
-			t.mu.Lock()
-			results := b.extractMessages(t, limit)
-			t.mu.Unlock()
+			matchingTopics = append(matchingTopics, t)
+		}
+	}
+	b.mu.Unlock()
 
-			if len(results) > 0 {
-				b.mu.Unlock()
-				return results, true
-			}
+	for _, t := range matchingTopics {
+		t.mu.Lock()
+		results := b.extractMessages(t, limit)
+		t.mu.Unlock()
+
+		if len(results) > 0 {
+			return results, true
 		}
 	}
 
+	b.mu.Lock()
 	if _, exists := b.Topics[topicName]; !exists {
 		if len(b.Topics) >= getMaxTopics() {
 			b.mu.Unlock()
 			return nil, false
 		}
-		b.Topics[topicName] = &Topic{Name: topicName}
+		t := &Topic{Name: topicName}
+		b.Topics[topicName] = t
+		b.wildcards[topicName] = t
 	}
 	wildcardTopic := b.Topics[topicName]
 	b.mu.Unlock()
@@ -492,7 +535,11 @@ func (b *Broker) Requeue(msg message.Message) {
 
 	b.mu.Lock()
 	if _, exists := b.Topics[targetTopic]; !exists {
-		b.Topics[targetTopic] = &Topic{Name: targetTopic}
+		t := &Topic{Name: targetTopic}
+		b.Topics[targetTopic] = t
+		if strings.Contains(targetTopic, "*") {
+			b.wildcards[targetTopic] = t
+		}
 	}
 	t := b.Topics[targetTopic]
 	b.mu.Unlock()
@@ -548,7 +595,12 @@ func (b *Broker) CreateTopic(topicName string, policy string) error {
 		policy = "reject"
 	}
 
-	b.Topics[topicName] = &Topic{Name: topicName, Policy: policy}
+	t := &Topic{Name: topicName, Policy: policy}
+	b.Topics[topicName] = t
+	if strings.Contains(topicName, "*") {
+		b.wildcards[topicName] = t
+	}
+
 	log.Printf("Created Topic '%s' manually via API/Dashboard with policy '%s'\n", topicName, policy)
 	return nil
 }
@@ -619,6 +671,7 @@ func (b *Broker) DeleteTopic(topicName string) error {
 	t.mu.Unlock()
 
 	delete(b.Topics, topicName)
+	delete(b.wildcards, topicName)
 	delete(b.webhooks, topicName)
 	delete(b.compiledRegex, topicName)
 	b.mu.Unlock()
@@ -679,6 +732,9 @@ func (b *Broker) AddSpy(topicName string) chan message.Message {
 	if !exists {
 		t = &Topic{Name: topicName}
 		b.Topics[topicName] = t
+		if strings.Contains(topicName, "*") {
+			b.wildcards[topicName] = t
+		}
 	}
 	b.mu.Unlock()
 
@@ -734,7 +790,11 @@ func (b *Broker) CreateGroup(topicName, groupName string) (string, error) {
 		if policy != "drop-oldest" {
 			policy = "reject"
 		}
-		b.Topics[virtualName] = &Topic{Name: virtualName, Policy: policy}
+		t := &Topic{Name: virtualName, Policy: policy}
+		b.Topics[virtualName] = t
+		if strings.Contains(virtualName, "*") {
+			b.wildcards[virtualName] = t
+		}
 	}
 
 	return virtualName, nil

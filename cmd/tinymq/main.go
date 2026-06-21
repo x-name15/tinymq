@@ -722,14 +722,14 @@ func main() {
 	mux.HandleFunc("/api/queues/delete", withAuth(srv.handleQueueDelete))
 	mux.HandleFunc("/api/queues/webhooks", withAuth(srv.handleGetWebhooks))
 
-	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/stats", withAuth(func(w http.ResponseWriter, r *http.Request) {
 		stats, totalWebhooks := b.GetStats()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"stats":          stats,
 			"total_webhooks": totalWebhooks,
 		})
-	})
+	}))
 
 	port := os.Getenv("PORT")
 	if port == "" {

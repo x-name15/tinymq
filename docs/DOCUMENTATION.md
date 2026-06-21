@@ -295,6 +295,7 @@ func main() {
 package main
 
 import (
+    "context"
     "fmt"
     "errors"
     "github.com/x-name15/tinymq/client"
@@ -304,7 +305,10 @@ import (
 func main() {
     mq := client.NewClient("http://127.0.0.1:7800")
 
-    go mq.Subscribe("orders", client.SubscriptionOptions{Timeout: "10s"}, func(msg message.Message) error {
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    go mq.Subscribe(ctx, "orders", client.SubscriptionOptions{Timeout: "10s"}, func(msg message.Message) error {
         fmt.Printf("Processing order: %s\n", string(msg.Payload))
         if string(msg.Payload) == "bad_data" {
             return errors.New("database connection lost") // Will trigger backoff & DLQ logic
@@ -367,3 +371,7 @@ services:
       - ./data:/root/data
     restart: unless-stopped
 ```
+> **Permissions Note:** TinyMQ runs as a secure, unprivileged user (`UID 10001`). If you are bind-mounting a local directory like `./data`, ensure the container has write permissions to it before starting:
+> ```bash
+> mkdir -p ./data && sudo chown -R 10001:10001 ./data
+> ```

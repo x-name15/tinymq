@@ -51,6 +51,23 @@ type CLIMessage struct {
 	RetryCount int       `json:"retry_count"`
 }
 
+func doAuthRequest(method, urlStr string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, urlStr, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	
+	if apiKey := os.Getenv("TINYMQ_API_KEY"); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	
+	client := &http.Client{}
+	return client.Do(req)
+}
+
 func main() {
 	baseURL := os.Getenv("TINYMQ_URL")
 	if baseURL == "" {
@@ -88,12 +105,17 @@ func main() {
 }
 
 func handleList(baseURL string) {
-	resp, err := http.Get(baseURL + "/api/stats")
+	resp, err := doAuthRequest(http.MethodGet, baseURL+"/api/stats", nil)
 	if err != nil {
 		fmt.Printf("%s[Error] Error connecting to the broker at %s: %v%s\n", colorRed, baseURL, err, colorReset)
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Printf("%s[Error] Unauthorized. Ensure TINYMQ_API_KEY is correctly set.%s\n", colorRed, colorReset)
+		return
+	}
 
 	body, _ := io.ReadAll(resp.Body)
 
@@ -168,12 +190,17 @@ func handlePublish(baseURL string, args []string) {
 	}
 
 	u := fmt.Sprintf("%s/publish/%s?%s", baseURL, url.PathEscape(topic), params.Encode())
-	resp, err := http.Post(u, "application/json", bytes.NewBuffer([]byte(payload)))
+	resp, err := doAuthRequest(http.MethodPost, u, bytes.NewBuffer([]byte(payload)))
 	if err != nil {
 		fmt.Printf("%s[Error] Network error: %v%s\n", colorRed, err, colorReset)
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Printf("%s[Error] Unauthorized. Ensure TINYMQ_API_KEY is correctly set.%s\n", colorRed, colorReset)
+		return
+	}
 
 	if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK {
 		fmt.Printf("%s✔ Message published successfully in '%s'%s\n", colorGreen, topic, colorReset)
@@ -208,12 +235,17 @@ func handleConsume(baseURL string, args []string) {
 	}
 
 	u := fmt.Sprintf("%s/consume/%s?%s", baseURL, url.PathEscape(topic), params.Encode())
-	resp, err := http.Get(u)
+	resp, err := doAuthRequest(http.MethodGet, u, nil)
 	if err != nil {
 		fmt.Printf("%s[Error] Network error: %v%s\n", colorRed, err, colorReset)
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Printf("%s[Error] Unauthorized. Ensure TINYMQ_API_KEY is correctly set.%s\n", colorRed, colorReset)
+		return
+	}
 
 	if resp.StatusCode == http.StatusNotFound {
 		fmt.Printf("%s[Empty] No messages available in '%s'%s\n", colorYellow, topic, colorReset)
@@ -250,12 +282,17 @@ func handlePeek(baseURL string, args []string) {
 	topic := leftover[0]
 
 	u := fmt.Sprintf("%s/api/queues/peek?queue=%s", baseURL, url.QueryEscape(topic))
-	resp, err := http.Get(u)
+	resp, err := doAuthRequest(http.MethodGet, u, nil)
 	if err != nil {
 		fmt.Printf("%s[Error] Network error: %v%s\n", colorRed, err, colorReset)
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Printf("%s[Error] Unauthorized. Ensure TINYMQ_API_KEY is correctly set.%s\n", colorRed, colorReset)
+		return
+	}
 
 	body, _ := io.ReadAll(resp.Body)
 	var messages []CLIMessage
@@ -292,10 +329,16 @@ func handleTail(baseURL string, args []string) {
 	safeTopic := url.PathEscape(topic)
 	for {
 		u := fmt.Sprintf("%s/consume/%s?timeout=5s&limit=1&auto_ack=true", baseURL, safeTopic)
-		resp, err := http.Get(u)
+		resp, err := doAuthRequest(http.MethodGet, u, nil)
 		if err != nil {
 			time.Sleep(1 * time.Second)
 			continue
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
+			fmt.Printf("%s[Error] Unauthorized. Ensure TINYMQ_API_KEY is correctly set.%s\n", colorRed, colorReset)
+			return
 		}
 
 		if resp.StatusCode == http.StatusOK {
@@ -351,6 +394,8 @@ func handleBench(baseURL string, args []string) {
 	jobs := make(chan int, *total)
 	start := time.Now()
 
+	apiKey := os.Getenv("TINYMQ_API_KEY")
+
 	for w := 1; w <= *concurrency; w++ {
 		wg.Add(1)
 		go func() {
@@ -359,6 +404,9 @@ func handleBench(baseURL string, args []string) {
 				url := fmt.Sprintf("%s/publish/%s", baseURL, safeTopic)
 				req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payload))
 				req.Header.Set("Content-Type", "application/json")
+				if apiKey != "" {
+					req.Header.Set("Authorization", "Bearer "+apiKey)
+				}
 
 				resp, err := client.Do(req)
 				if err != nil {
@@ -533,5 +581,6 @@ func printHelp() {
 	fmt.Println("  backup                Compresses the ./data folder (flags: --format=zip|tar).")
 	fmt.Println("\nEnvironment variables:")
 	fmt.Println("  TINYMQ_URL            Broker URL (Default: http://localhost:7800)")
+	fmt.Println("  TINYMQ_API_KEY        API Token for authenticated endpoints (Optional)")
 	fmt.Println()
 }

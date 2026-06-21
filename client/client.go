@@ -15,6 +15,7 @@ import (
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	apiKey     string
 }
 
 type PublishOptions struct {
@@ -29,12 +30,22 @@ type SubscriptionOptions struct {
 
 type MessageHandler func(msg message.Message) error
 
-func NewClient(baseURL string) *Client {
-	return &Client{
+func NewClient(baseURL string, apiKey ...string) *Client {
+	c := &Client{
 		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: 35 * time.Second,
 		},
+	}
+	if len(apiKey) > 0 {
+		c.apiKey = apiKey[0]
+	}
+	return c
+}
+
+func (c *Client) authorize(req *http.Request) {
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 }
 
@@ -62,7 +73,11 @@ func (c *Client) Publish(topic string, payload []byte, opts ...PublishOptions) e
 		u = fmt.Sprintf("%s/publish/%s", c.baseURL, safeTopic)
 	}
 
-	resp, err := c.httpClient.Post(u, "application/json", bytes.NewBuffer(payload))
+	req, _ := http.NewRequest(http.MethodPost, u, bytes.NewBuffer(payload))
+	req.Header.Set("Content-Type", "application/json")
+	c.authorize(req)
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
@@ -104,6 +119,7 @@ func (c *Client) Subscribe(ctx context.Context, topic string, options Subscripti
 		}
 
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		c.authorize(req)
 		resp, err := c.httpClient.Do(req)
 
 		if err != nil {
@@ -142,7 +158,11 @@ func (c *Client) Subscribe(ctx context.Context, topic string, options Subscripti
 
 			if err == nil {
 				ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, safeTopic, safeMsgID)
-				if ackResp, ackErr := c.httpClient.Post(ackURL, "application/json", nil); ackErr == nil {
+				ackReq, _ := http.NewRequest(http.MethodPost, ackURL, nil)
+				ackReq.Header.Set("Content-Type", "application/json")
+				c.authorize(ackReq)
+
+				if ackResp, ackErr := c.httpClient.Do(ackReq); ackErr == nil {
 					ackResp.Body.Close()
 				}
 				currentBackoff = baseBackoff
@@ -151,13 +171,21 @@ func (c *Client) Subscribe(ctx context.Context, topic string, options Subscripti
 				fmt.Printf("[SDK Resilience] Re-queuing message %s to preserve...\n", msg.ID)
 
 				ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, safeTopic, safeMsgID)
-				if ackResp, ackErr := c.httpClient.Post(ackURL, "application/json", nil); ackErr == nil {
+				ackReq, _ := http.NewRequest(http.MethodPost, ackURL, nil)
+				ackReq.Header.Set("Content-Type", "application/json")
+				c.authorize(ackReq)
+
+				if ackResp, ackErr := c.httpClient.Do(ackReq); ackErr == nil {
 					ackResp.Body.Close()
 				}
 
 				msgData, _ := json.Marshal(msg)
 				requeueURL := fmt.Sprintf("%s/requeue", c.baseURL)
-				if reqResp, reqErr := c.httpClient.Post(requeueURL, "application/json", bytes.NewBuffer(msgData)); reqErr == nil {
+				reqReq, _ := http.NewRequest(http.MethodPost, requeueURL, bytes.NewBuffer(msgData))
+				reqReq.Header.Set("Content-Type", "application/json")
+				c.authorize(reqReq)
+
+				if reqResp, reqErr := c.httpClient.Do(reqReq); reqErr == nil {
 					reqResp.Body.Close()
 				}
 
