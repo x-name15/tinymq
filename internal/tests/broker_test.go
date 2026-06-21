@@ -176,7 +176,7 @@ func TestBroadcastMode(t *testing.T) {
 		t.Fatalf("Broadcast publish failed: %v", err)
 	}
 
-	// Usamos un pequeño timeout en lugar de un default instantáneo 
+	// Usamos un pequeño timeout en lugar de un default instantáneo
 	// porque el broadcast del broker ocurre en una goroutine asíncrona.
 	select {
 	case <-ch1:
