@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
@@ -95,6 +96,16 @@ func main() {
 		handleBench(baseURL, os.Args[2:])
 	case "backup":
 		handleBackup(os.Args[2:])
+	case "rm", "delete":
+		handleRm(baseURL, os.Args[2:], false)
+	case "purge":
+		handleRm(baseURL, os.Args[2:], true)
+	case "webhook":
+		handleWebhook(baseURL, os.Args[2:])
+	case "top":
+		handleTop(baseURL)
+	case "shell":
+		handleShell(baseURL)
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -324,14 +335,27 @@ func handleTail(baseURL string, args []string) {
 	}
 	topic := args[0]
 
-	fmt.Printf("%sSpy Mode: Listening to '%s' in real-time... (Ctrl+C to exit)%s\n", colorBold+colorGreen, topic, colorReset)
+	fmt.Printf("%sSpy Mode: Listening to '%s' in real-time via SSE... (Ctrl+C to exit)%s\n", colorBold+colorGreen, topic, colorReset)
 
 	safeTopic := url.PathEscape(topic)
+	streamURL := fmt.Sprintf("%s/stream/%s", baseURL, safeTopic)
+
 	for {
-		u := fmt.Sprintf("%s/consume/%s?timeout=5s&limit=1&auto_ack=true", baseURL, safeTopic)
-		resp, err := doAuthRequest(http.MethodGet, u, nil)
+		req, err := http.NewRequest(http.MethodGet, streamURL, nil)
 		if err != nil {
-			time.Sleep(1 * time.Second)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if apiKey := os.Getenv("TINYMQ_API_KEY"); apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Printf("%s[Connection Lost] Retrying in 2s...%s\n", colorRed, colorReset)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
@@ -341,19 +365,53 @@ func handleTail(baseURL string, args []string) {
 			return
 		}
 
-		if resp.StatusCode == http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			messages, err := parseMessagesPayload(body)
-			if err == nil && len(messages) > 0 {
-				msg := messages[0]
-				fmt.Printf("%s[%s]%s %s %s->%s %s\n",
-					colorBlue, msg.Timestamp.Format("15:04:05"), colorReset,
-					colorBold+colorCyan, msg.ID[:8], colorReset,
-					string(msg.Payload),
-				)
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			fmt.Printf("%s[Error] Broker returned status %d. Retrying in 2s...%s\n", colorRed, resp.StatusCode, colorReset)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
+				break
+			}
+
+			lineStr := string(line)
+			if strings.HasPrefix(lineStr, "data: ") {
+				dataStr := strings.TrimPrefix(lineStr, "data: ")
+				dataStr = strings.TrimSpace(dataStr)
+
+				if dataStr == "" {
+					continue
+				}
+
+				var rawMap map[string]interface{}
+				if err := json.Unmarshal([]byte(dataStr), &rawMap); err == nil {
+					if status, ok := rawMap["status"].(string); ok && status == "connected" {
+						fmt.Printf("%s[SSE] Connected successfully! Waiting for messages...%s\n", colorYellow, colorReset)
+						continue
+					}
+				}
+
+				var msg CLIMessage
+				if err := json.Unmarshal([]byte(dataStr), &msg); err == nil && msg.ID != "" {
+					var payloadStr string
+					payloadStr = string(msg.Payload)
+
+					fmt.Printf("%s[%s]%s %s %s->%s %s\n",
+						colorBlue, msg.Timestamp.Format("15:04:05"), colorReset,
+						colorBold+colorCyan, msg.ID[:8], colorReset,
+						payloadStr,
+					)
+				}
 			}
 		}
+
 		resp.Body.Close()
+		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -567,6 +625,148 @@ func parseMessagesPayload(body []byte) ([]CLIMessage, error) {
 	return nil, fmt.Errorf("incompatible JSON format")
 }
 
+func handleRm(baseURL string, args []string, isPurge bool) {
+	if len(args) < 1 {
+		if isPurge {
+			fmt.Println("Use: tmq purge <queue>")
+		} else {
+			fmt.Println("Use: tmq rm <queue>")
+		}
+		return
+	}
+	topic := args[0]
+	endpoint := "/api/queues/delete"
+	actionStr := "deleted"
+	if isPurge {
+		endpoint = "/api/queues/purge"
+		actionStr = "purged"
+	}
+
+	u := fmt.Sprintf("%s%s?queue=%s", baseURL, endpoint, url.QueryEscape(topic))
+	resp, err := doAuthRequest(http.MethodDelete, u, nil)
+	if err != nil {
+		fmt.Printf("%s[Error] Network error: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		fmt.Printf("%s✔ Queue '%s' successfully %s!%s\n", colorGreen, topic, actionStr, colorReset)
+	} else {
+		fmt.Printf("%s[Error] Broker returned status %d%s\n", colorRed, resp.StatusCode, colorReset)
+	}
+}
+
+func handleWebhook(baseURL string, args []string) {
+	if len(args) < 2 {
+		fmt.Println("Use: tmq webhook list <topic>\n     tmq webhook add <topic> <url>")
+		return
+	}
+	action, topic := args[0], args[1]
+
+	if action == "list" {
+		u := fmt.Sprintf("%s/api/queues/webhooks?queue=%s", baseURL, url.QueryEscape(topic))
+		resp, err := doAuthRequest(http.MethodGet, u, nil)
+		if err != nil {
+			fmt.Println("Error:", err)
+			return
+		}
+		defer resp.Body.Close()
+		var urls []string
+		json.NewDecoder(resp.Body).Decode(&urls)
+		fmt.Printf("\n%sWebhooks for '%s':%s\n", colorBold+colorCyan, topic, colorReset)
+		if len(urls) == 0 {
+			fmt.Println("  (No webhooks registered)")
+		} else {
+			for _, u := range urls {
+				fmt.Printf("  - %s\n", u)
+			}
+		}
+		fmt.Println()
+	} else if action == "add" && len(args) == 3 {
+		targetURL := args[2]
+		u := fmt.Sprintf("%s/webhook/%s", baseURL, url.PathEscape(topic))
+		body := fmt.Sprintf(`{"url":"%s"}`, targetURL)
+		resp, err := doAuthRequest(http.MethodPost, u, bytes.NewBuffer([]byte(body)))
+		if err != nil {
+			fmt.Println("Error:", err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusCreated {
+			fmt.Printf("%s✔ Webhook registered successfully!%s\n", colorGreen, colorReset)
+		} else {
+			b, _ := io.ReadAll(resp.Body)
+			fmt.Printf("%s[Error] %s%s\n", colorRed, string(b), colorReset)
+		}
+	} else {
+		fmt.Println("Invalid webhook command.")
+	}
+}
+
+func handleTop(baseURL string) {
+	for {
+		fmt.Print("\033[H\033[2J")
+		handleList(baseURL)
+		fmt.Printf("\n%s(Refreshing every 2s. Press Ctrl+C to exit)%s\n", colorYellow, colorReset)
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func handleShell(baseURL string) {
+	fmt.Printf("%sEntering TinyMQ Interactive Shell. Type 'exit' to quit.%s\n", colorBold+colorGreen, colorReset)
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Printf("%stinymq>%s ", colorCyan, colorReset)
+		if !scanner.Scan() {
+			break
+		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "exit" || input == "quit" {
+			break
+		}
+		if input == "" {
+			continue
+		}
+
+		parts := strings.SplitN(input, " ", 3)
+		cmd := parts[0]
+
+		var args []string
+		if len(parts) > 1 {
+			if (cmd == "pub" || cmd == "publish") && len(parts) == 3 {
+				args = []string{parts[1], parts[2]}
+			} else {
+				args = strings.Split(input[len(cmd)+1:], " ")
+			}
+		}
+
+		switch cmd {
+		case "list", "status":
+			handleList(baseURL)
+		case "pub", "publish":
+			handlePublish(baseURL, args)
+		case "sub", "consume":
+			handleConsume(baseURL, args)
+		case "peek":
+			handlePeek(baseURL, args)
+		case "rm", "delete":
+			handleRm(baseURL, args, false)
+		case "purge":
+			handleRm(baseURL, args, true)
+		case "webhook":
+			handleWebhook(baseURL, args)
+		case "help":
+			printHelp()
+		default:
+			fmt.Println("Unknown command in shell. Type 'help'.")
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("%s[Error] %v%s\n", colorRed, err, colorReset)
+	}
+}
+
 func printHelp() {
 	fmt.Printf("%s🍃 TinyMQ CLI (tmq) - Terminal Control Panel%s\n\n", colorBold+colorGreen, colorReset)
 	fmt.Println("Use:")
@@ -579,6 +779,13 @@ func printHelp() {
 	fmt.Println("  tail <queue>          Live streaming mode (prints messages in real-time).")
 	fmt.Println("  bench <queue>         Runs a stress test (flags: --total, --concurrency).")
 	fmt.Println("  backup                Compresses the ./data folder (flags: --format=zip|tar).")
+	fmt.Println("  bench <queue>         Runs a stress test (flags: --total, --concurrency).")
+	fmt.Println("  backup                Compresses the ./data folder (flags: --format=zip|tar).")
+	fmt.Println("  rm <queue>            Deletes a queue and its log file entirely.")
+	fmt.Println("  purge <queue>         Empties a queue without deleting it.")
+	fmt.Println("  webhook <add|list>    Manages webhooks for a topic (e.g., webhook add topic http://...).")
+	fmt.Println("  top                   Live dashboard in your terminal.")
+	fmt.Println("  shell                 Opens an interactive REPL session.")
 	fmt.Println("\nEnvironment variables:")
 	fmt.Println("  TINYMQ_URL            Broker URL (Default: http://localhost:7800)")
 	fmt.Println("  TINYMQ_API_KEY        API Token for authenticated endpoints (Optional)")

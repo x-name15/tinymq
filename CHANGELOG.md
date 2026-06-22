@@ -3,6 +3,25 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.7.5] - 2026-06-22 — The Ecosystem Update
+
+### Added
+- **Native WS Client (SDK):** Introduced `client.WSClient`, a zero-dependency WebSocket client for Go. It handles the RFC 6455 handshake natively and decodes Base64 payloads automatically, offering developers sub-millisecond asynchronous message processing.
+- **Real-Time CLI (SSE):** Upgraded the `tmq tail` command. It now utilizes Server-Sent Events (SSE) via the `/stream/` endpoint instead of HTTP long-polling, achieving zero-latency terminal monitoring with automatic reconnection logic.
+- **Interactive CLI Shell:** Added `tmq shell` for an interactive REPL experience, allowing sequential command execution without re-authenticating or re-typing the broker URL.
+- **Terminal Dashboard:** Added `tmq top` for a live, auto-refreshing terminal interface to monitor queue stats in real-time.
+- **Queue Management Commands:** Added `tmq rm <queue>` (delete) and `tmq purge <queue>` (empty) for complete CLI-based lifecycle management.
+- **Webhook Management:** Added `tmq webhook list <topic>` and `tmq webhook add <topic> <url>` to manage push-consumers directly from the terminal.
+
+### Fixed
+- **Staticcheck Compliance:** Optimized `readFrame` inside the WebSocket client to use a `switch` statement for `payloadLen`, fixing linter warnings and slightly improving execution speed.
+- **Documentation:** Updated `DOCUMENTATION.md` to feature the new `WSClient` usage examples and the real-time capabilities of the CLI.
+- **Scanner Safety:** Added mandatory `scanner.Err()` checks across the CLI to prevent silent failures during file I/O operations.
+- **WebSocket Leak Mitigation:** Added `done` signal channel in WebSocket client to ensure background spy goroutines terminate immediately upon client disconnection.
+- **CI/CD:** Fixed Docker volume paths and exposed MQTT port in manifest.
+- **Storage Reliability:** Increased `bufio.Scanner` buffers to 4MB to support large payload recovery without truncation.
+
+---
 ## [2.7.0] - 2026-06-22 — The Internet of Things (MQTT) Update
 
 ### Added

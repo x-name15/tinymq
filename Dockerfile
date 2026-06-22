@@ -1,5 +1,6 @@
 # === Phase 1 ===
-FROM golang:1.26-alpine3.24 AS builder
+# Ajustado a 1.23 según acordamos
+FROM golang:1.23-alpine3.24 AS builder
 
 RUN apk update && apk add --no-cache ca-certificates && update-ca-certificates
 RUN adduser -D -g '' -u 10001 tinymq
@@ -20,8 +21,9 @@ COPY --from=builder /etc/passwd /etc/passwd
 WORKDIR /home/tinymq/
 
 COPY --from=builder --chown=10001:10001 /app/tinymq .
+RUN mkdir -p /home/tinymq/data && chown 10001:10001 /home/tinymq/data
 
 USER 10001
-EXPOSE 7800
+EXPOSE 7800 1883
 
 CMD ["./tinymq"]

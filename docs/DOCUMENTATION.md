@@ -258,33 +258,26 @@ export TINYMQ_URL=http://your-server-ip:7800
 ### Commands
 
 ```bash
-# List all active topics and their status
-tmq status
+# General info
+tmq status              # Shows active queues, RAM, and consumers
+tmq top                 # Opens a live, auto-refreshing dashboard in your terminal
+tmq shell               # Opens an interactive REPL session (tinymq> prompt)
 
-# Publish a message to a topic
-tmq pub <topic> <payload>
-tmq pub orders.eu '{"user_id": 42}' --ttl=5m
-tmq pub notifications '{"msg": "hello"}' --delay=10s --broadcast
+# Queue operations
+tmq pub <topic> <data>  # Publishes a message (--ttl, --delay, --broadcast)
+tmq sub <topic>         # Consumes messages (--timeout, --limit, --auto-ack)
+tmq peek <topic>        # Inspects messages in RAM without consuming
+tmq tail <topic>        # Zero-latency live stream monitoring (SSE)
 
-# Consume a message from a topic
-tmq sub <topic>
-tmq sub orders.eu --timeout=10s --limit=5 --auto-ack=false
+# Administration
+tmq rm <topic>          # Completely deletes a topic and its .log file
+tmq purge <topic>       # Empties a topic without deleting it
+tmq webhook list <top>  # Lists registered webhooks for a topic
+tmq webhook add <top> <url> # Registers a new webhook destination
 
-# Peek at messages without consuming them
-tmq peek <topic>
-
-# Watch a topic in real time
-tmq tail <topic>
-
-# Run a high-concurrency stress test against the broker
-tmq bench <topic> --total=50000 --concurrency=100
-
-# Safely compress active WAL (.log) files for easy state migrations (TAR)
-tmq backup --format=tar
-
-# Safely compress active WAL (.log) files for easy state migrations (ZIP)
-tmq backup --format=zip
-
+# Utilities
+tmq bench <topic>       # Runs a high-concurrency stress test
+tmq backup              # Compresses the ./data folder (--format=zip|tar)
 ```
 
 ---
@@ -355,6 +348,41 @@ func main() {
 }
 ```
 
+### Real-Time WebSocket Client
+
+For sub-millisecond latency without HTTP overhead, you can use the native WebSocket client. This is ideal for high-throughput, long-lived connections.
+
+`WSClient` handles the RFC 6455 handshake, frame masking, and base64 payload decoding natively.
+
+```go
+package main
+
+import (
+    "fmt"
+    "[github.com/x-name15/tinymq/client](https://github.com/x-name15/tinymq/client)"
+    "[github.com/x-name15/tinymq/internal/message](https://github.com/x-name15/tinymq/internal/message)"
+)
+
+func main() {
+    // URL uses http/https, the client automatically upgrades it to ws/wss
+    ws := client.NewWSClient("[http://127.0.0.1:7800](http://127.0.0.1:7800)", "optional_api_key")
+    
+    if err := ws.Connect(); err != nil {
+        panic(err)
+    }
+
+    // Subscribe asynchronously
+    go ws.Subscribe("iot.sensors.*", func(msg message.Message) {
+        fmt.Printf("Instant WS Push -> ID: %s | Payload: %s\n", msg.ID, string(msg.Payload))
+    })
+
+    // Publish instantly without HTTP connection overhead
+    ws.Publish("iot.sensors.temperature", []byte(`{"celsius": 24.5}`))
+
+    select {} // Block forever
+}
+```
+
 ### System Limits & Security
 To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
 - **Max Payload Size:** `2 MB` per HTTP request. Exceeding this limit will safely abort the connection and return an `HTTP 413 Request Entity Too Large` error.
@@ -393,19 +421,23 @@ docker run -d \
 
 ### Persistent data (Docker Compose)
 
-TinyMQ writes WAL `.log` files into `./data`. In Docker Compose, mount this path to a persistent volume.
+TinyMQ writes WAL `.log` files into `/home/tinymq/data` inside the container. To ensure data persistence across container restarts, mount a local directory to this path:
 
 ```yaml
 services:
   tinymq:
-    image: ghcr.io/x-name15/tinymq:latest
+    build: .
+    image: tinymq:latest
     env_file:
       - .env
     ports:
       - "${PORT:-7800}:7800"
+      - "${TINYMQ_MQTT_PORT:-1883}:${TINYMQ_MQTT_PORT:-1883}"
     volumes:
-      - ./data:/root/data
+      # Mount your local ./data directory to the container's internal data path
+      - ./data:/home/tinymq/data
     restart: unless-stopped
+    user: "10001:10001"
 ```
 > **Permissions Note:** TinyMQ runs as a secure, unprivileged user (`UID 10001`). If you are bind-mounting a local directory like `./data`, ensure the container has write permissions to it before starting:
 > ```bash
