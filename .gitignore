@@ -3,3 +3,4 @@
 /examples/
 tinymq.exe
 repomix-output.xml
+.github/workflows/local.test.yaml

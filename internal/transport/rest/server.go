@@ -21,6 +21,7 @@ import (
 
 	"github.com/x-name15/tinymq/internal/broker"
 	"github.com/x-name15/tinymq/internal/message"
+	"github.com/x-name15/tinymq/internal/transport/ws"
 )
 
 //go:embed dashboard.html
@@ -86,6 +87,10 @@ func NewServer(b *broker.Broker, port string, version string) *Server {
 		Addr:    ":" + port,
 		Handler: mux,
 	}
+
+	// WebSockets (Protocol TMP-WS)
+	wsServer := ws.NewServer(b)
+	mux.HandleFunc("/ws", wsServer.HandleWS)
 
 	return s
 }

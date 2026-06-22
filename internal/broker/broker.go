@@ -237,6 +237,26 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		}(urls, payload)
 	}
 
+	t.mu.Lock()
+	for _, spy := range t.spies {
+		select {
+		case spy <- msg:
+		default:
+		}
+	}
+	t.mu.Unlock()
+
+	for _, wildcardT := range matchingWildcards {
+		wildcardT.mu.Lock()
+		for _, spy := range wildcardT.spies {
+			select {
+			case spy <- msg:
+			default:
+			}
+		}
+		wildcardT.mu.Unlock()
+	}
+
 	if isBroadcast {
 		var broadcastChannels []chan message.Message
 
@@ -312,13 +332,6 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 	}
 
 	t.Messages = append(t.Messages, msg)
-
-	for _, spy := range t.spies {
-		select {
-		case spy <- msg:
-		default:
-		}
-	}
 
 	return nil
 }
