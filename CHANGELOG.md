@@ -3,6 +3,28 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.6.0] - 2026-06-22 — The Native WebSocket & Performance Update
+
+## Added
+- **Native WebSockets (TMP-WS):** Introduced a zero-dependency WebSocket protocol implementation (`/ws`). Clients can now establish a persistent, full-duplex TCP connection to the broker for sub-millisecond latency. Supports `ping/pong` heartbeats, `publish`, and `subscribe` commands with native Base64 binary-safe JSON delivery.
+
+## Security
+- **WebSocket Authentication (CWE-306):** The `/ws` endpoint is now fully protected by the `TINYMQ_API_KEY`. Browsers can authenticate by appending the token to the URL (`ws://.../ws?token=...`).
+- **DoS Protection on Spy Channels (CWE-770 & CWE-20):** Hardened the `AddSpy` method utilized by both WebSockets and SSE `/stream`. It now strictly enforces `validTopicRegex` against path traversal and blocks creation if the broker has reached the `TINYMQ_MAX_TOPICS` limit.
+- **WebSocket Frame Corruption (CWE-116):** Migrated the WebSocket TCP reader from generic `Read` to `io.ReadFull` buffers, completely eliminating the risk of frame corruption under high latency or massive payload scenarios.
+- **Strict JSON Marshal:** Refactored WebSocket responses to use struct-based `json.Marshal` instead of string interpolation (`fmt.Sprintf`), preventing silent JSON malformation if a queue name contained escape characters.
+- **Silent Spy Drops (Observability):** The broker now explicitly logs a warning if a WebSocket or SSE client is consuming too slowly and its 50-message buffer gets full, dropping messages.
+- **Strict Wildcard Validation (CWE-20):** Eliminated technical debt by introducing strict regex validation for wildcard subscriptions. The broker now natively accepts the global wildcard (`*`) or suffix wildcards (`events.*`) while explicitly rejecting malformed or embedded wildcards (e.g., `a*b` or `**`), hardening the routing engine against syntax-based logic errors.
+
+## Performance
+- **Lock-Free Telemetry (Stop-The-World Elimination):** Rewrote `GetStats()`. It no longer acquires topic-level Mutexes to read sizes. UI Auto-Refresh now fetches `/api/stats` natively using JS instead of triggering full HTML DOM reloads, drastically reducing `runtime.ReadMemStats` CPU pauses.
+- **Zero-Latency WS Hub:** Eliminated blocking channels (`make(chan *Client)`) in the WebSocket connection Hub, replacing them with direct Mutex maps to remove artificial latencies during connection handshakes.
+- **Global Lock Avoidance in `Consume`:** Further optimized wildcard routing. `Consume` now utilizes "Copy-under-lock" memory techniques, successfully releasing the broker's Global Mutex *before* performing disk I/O, allowing concurrent producers to operate uninterrupted even when massive wildcards are being queried.
+
+## Quality
+- **Test Suite Enhancements:** `ws_test` now dynamically allocates ports (`127.0.0.1:0`) and uses `t.Cleanup` context timeouts to fully support `t.Parallel()` without collision. Corrected logic in `TestConsumeAndAck` to validate the correct UUID.
+
+---
 ## [2.5.1] - 2026-06-20 — More Fixes
 
 ## Fixed

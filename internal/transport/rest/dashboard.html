@@ -169,15 +169,15 @@
             </div>
             <div class="metric-card blue">
                 <div class="metric-label">Active Queues/Topics</div>
-                <div class="metric-value">{{.TotalTopics}}</div>
+                <div class="metric-value" id="dash-topics">{{.TotalTopics}}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Messages in RAM</div>
-                <div class="metric-value">{{.TotalMessages}}</div>
+                <div class="metric-value" id="dash-msgs">{{.TotalMessages}}</div>
             </div>
             <div class="metric-card orange">
                 <div class="metric-label">Webhooks</div>
-                <div class="metric-value">{{.TotalWebhooks}}</div>
+                <div class="metric-value" id="dash-webhooks">{{.TotalWebhooks}}</div>
             </div>
             <div class="metric-card purple">
                 <div class="metric-label">Broker Memory</div>
@@ -347,16 +347,55 @@
         async function fetchStatsAndUpdate() {
             if (isModalOpen) return;
             try {
-                const htmlRes = await fetch('/dashboard');
-                if (!htmlRes.ok) return;
-                const htmlText = await htmlRes.text();
+                const res = await fetch('/api/stats');
+                if (!res.ok) return;
+                const data = await res.json();
+                
+                document.getElementById('dash-topics').innerText = data.stats.length;
+                let totalMsgs = 0;
+                let html = '';
+                
+                data.stats.forEach(topic => {
+                    totalMsgs += topic.MessageCount;
+                    
+                    let badges = '';
+                    if (topic.IsDLQ) badges += '<span class="badge dlq">DLQ</span>';
+                    
+                    let webhookBadge = topic.HasWebhooks 
+                        ? `<span class="badge webhook" onclick="openWebhookModal('${topic.Name}')" title="View Webhooks">Webhooks</span>`
+                        : `<span class="badge webhook" style="background:#cbd5e0; color:#718096;" onclick="openWebhookModal('${topic.Name}')" title="Add Webhook">Add</span>`;
 
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(htmlText, 'text/html');
+                    let consHTML = topic.WaitingConsumers > 0 
+                        ? `<span class="consumer-count"> ${topic.WaitingConsumers}</span>` 
+                        : `<span style="color: var(--muted-color);">0</span>`;
+                        
+                    html += `<tr class="topic-row ${topic.IsDLQ ? 'is-dlq' : ''}">
+                        <td><span class="topic-name">${topic.Name}</span> ${badges} ${webhookBadge}</td>
+                        <td style="text-align: center;">${consHTML}</td>
+                        <td style="text-align: right;"><span class="msg-count">${topic.MessageCount}</span></td>
+                        <td>
+                            <div class="row-actions">
+                                <button class="btn-sm btn-pub" onclick="openPublishModal('${topic.Name}')" title="Publish Message">Pub</button>
+                                <button class="btn-sm btn-sub" onclick="consumeMessage('${topic.Name}')" title="Consume Message">Sub</button>
+                                <button class="btn-sm btn-peek" onclick="peekQueue('${topic.Name}')" title="Peek RAM">Peek</button>
+                                <button class="btn-sm btn-tail" onclick="openTailModal('${topic.Name}')" title="Live Stream (SSE)">⚡ Tail</button>
+                                <div style="border-left: 1px solid var(--border-light); height: 16px; margin: 0 4px;"></div>
+                                <button class="btn-sm btn-danger" onclick="purgeQueue('${topic.Name}')" title="Purge Queue">Purge</button>
+                                <button class="btn-sm btn-danger" onclick="deleteQueue('${topic.Name}')" title="Delete Queue">❌</button>
+                            </div>
+                        </td>
+                    </tr>`;
+                });
                 
-                document.querySelector('.metrics-grid').innerHTML = doc.querySelector('.metrics-grid').innerHTML;
-                document.querySelector('#topicsTable tbody').innerHTML = doc.querySelector('#topicsTable tbody').innerHTML;
+                if (data.stats.length === 0) {
+                    html = '<tr><td colspan="4" style="text-align: center; color: var(--muted-color); padding: 40px 0;">No queues in memory at this moment.</td></tr>';
+                }
+
+                document.getElementById('dash-msgs').innerText = totalMsgs;
+                document.getElementById('dash-webhooks').innerText = data.total_webhooks;
+                document.querySelector('#topicsTable tbody').innerHTML = html;
                 
+                filterTable(); 
             } catch (e) {
                 console.error("Auto-refresh failed", e);
             }

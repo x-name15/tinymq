@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,26 +19,34 @@ import (
 	"github.com/x-name15/tinymq/internal/transport/rest"
 )
 
-// setupTestServer runs broker server and port for testing
-func setupTestServer() (*broker.Broker, *rest.Server, string) {
+func setupTestServer(t *testing.T) (*broker.Broker, *rest.Server, string) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to find free port: %v", err)
+	}
+	port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	l.Close()
+
 	b := broker.New(nil)
-	port := "17800"
-	s := rest.NewServer(b, port, "test-v2.5.1")
+	s := rest.NewServer(b, port, "test-v2.6.0")
 	go s.Start()
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		s.Stop(ctx)
+	})
+
 	return b, s, port
 }
 
-// writeWSFrame masks (XOR) and send a payload pretending to be a web browser (RFC 6455)
 func writeWSFrame(conn net.Conn, payload string) {
 	data := []byte(payload)
 	length := len(data)
 
-	// OpCodeText (1) + FIN (0x80) = 0x81
-	// Mask bit (0x80) + length (assuming len < 126 for the test)
 	header := []byte{0x81, byte(length) | 0x80}
-
-	// Static Mask key for testing purposes (in real scenarios, this should be random)
 	maskKey := []byte{0x12, 0x34, 0x56, 0x78}
 	header = append(header, maskKey...)
 
@@ -48,23 +59,32 @@ func writeWSFrame(conn net.Conn, payload string) {
 	conn.Write(maskedPayload)
 }
 
-// readWSFrame reads a unmasked frame coming from the server
 func readWSFrame(conn net.Conn) string {
 	header := make([]byte, 2)
-	conn.Read(header)
+	io.ReadFull(conn, header)
 
 	payloadLen := int(header[1] & 0x7F)
+	switch payloadLen {
+	case 126:
+		ext := make([]byte, 2)
+		io.ReadFull(conn, ext)
+		payloadLen = int(binary.BigEndian.Uint16(ext))
+	case 127:
+		ext := make([]byte, 8)
+		io.ReadFull(conn, ext)
+		payloadLen = int(binary.BigEndian.Uint64(ext))
+	}
+
 	if payloadLen == 0 {
 		return ""
 	}
 
 	payload := make([]byte, payloadLen)
-	conn.Read(payload)
+	io.ReadFull(conn, payload)
 
 	return string(payload)
 }
 
-// HandShake HTTP -> WS
 func dialAndHandshake(t *testing.T, port string) net.Conn {
 	conn, err := net.Dial("tcp", "127.0.0.1:"+port)
 	if err != nil {
@@ -101,11 +121,8 @@ func dialAndHandshake(t *testing.T, port string) net.Conn {
 	return conn
 }
 
-// Validate WebSocket Handshake and Ping/Pong interaction.
 func TestWebSocketPingPong(t *testing.T) {
-	_, s, port := setupTestServer()
-	defer s.Stop(context.Background())
-
+	_, _, port := setupTestServer(t)
 	conn := dialAndHandshake(t, port)
 	defer conn.Close()
 
@@ -117,11 +134,8 @@ func TestWebSocketPingPong(t *testing.T) {
 	}
 }
 
-// Validate Full-Duplex Publish and Subscribe via WebSocket
 func TestWebSocketPubSub(t *testing.T) {
-	_, s, port := setupTestServer()
-	defer s.Stop(context.Background())
-
+	_, _, port := setupTestServer(t)
 	conn := dialAndHandshake(t, port)
 	defer conn.Close()
 
@@ -135,7 +149,6 @@ func TestWebSocketPubSub(t *testing.T) {
 
 	resp1 := readWSFrame(conn)
 	resp2 := readWSFrame(conn)
-
 	combinedResponses := resp1 + resp2
 
 	if !strings.Contains(combinedResponses, `"status":"published"`) {
@@ -148,11 +161,8 @@ func TestWebSocketPubSub(t *testing.T) {
 	}
 }
 
-// Validate that malformed JSON is rejected
 func TestWebSocketInvalidFormat(t *testing.T) {
-	_, s, port := setupTestServer()
-	defer s.Stop(context.Background())
-
+	_, _, port := setupTestServer(t)
 	conn := dialAndHandshake(t, port)
 	defer conn.Close()
 

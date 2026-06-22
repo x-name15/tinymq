@@ -18,6 +18,7 @@ Built from scratch in Go with zero external heavy dependencies.
 |---------|-------------|
 | **Zero Dependencies** | Pure Go implementation under ~15MB. Extremely low RAM and CPU footprint. |
 | **Consumer Groups (Pub/Sub)** | Multiple microservices can read the same event stream independently via Virtual Topic Binding (`?group=name`) without competing for payloads. |
+| **Native WebSockets** | Full-duplex TCP connections (`/ws`) for sub-millisecond, bi-directional publishing and subscribing. |
 | **Smart Disk Persistence & GC** | Append-only Write-Ahead Log (`.log`) architecture with a background Auto-Compactor (Garbage Collector) to prevent infinite disk growth. |
 | **Strict Durability (FSync)** | Configurable bank-grade physical disk flushing after every operation to protect against sudden power loss. |
 | **Live Streaming (SSE)** | Real-time, non-destructive topic monitoring (`GET /stream`) utilizing native Server-Sent Events. |

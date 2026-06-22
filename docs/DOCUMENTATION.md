@@ -112,6 +112,29 @@ If `limit=1` (Default), returns a single JSON object. If `limit > 1`, returns a 
   "message": "No messages in topic"
 }
 ```
+### Real-Time Full-Duplex (WebSockets)
+
+**Endpoint:** `GET /ws`
+
+TinyMQ natively implements the RFC 6455 WebSocket protocol to offer a single, bidirectional TCP connection for sub-millisecond publishing and subscribing. 
+
+**Authentication:** If `TINYMQ_API_KEY` is enabled, you must authenticate the connection. Browsers can pass the token via URL parameter: `ws://127.0.0.1:7800/ws?token=<your_token>`. Programmatic clients can use standard HTTP `Authorization: Bearer <token>` headers during the initial handshake.
+
+Once connected, communication uses a simple JSON Command structure (`TMP-WS`). 
+
+**Commands:**
+* **Subscribe:** Listen to a topic or wildcard (`*`).
+    * *Send:* `{"action": "subscribe", "topic": "events.*"}`
+    * *Receive:* `{"status": "subscribed", "topic": "events.*"}`
+* **Publish:** Dispatch a message into the broker.
+    * *Send:* `{"action": "publish", "topic": "sensor.data", "payload": "temperature-high"}`
+    * *Receive:* `{"status": "published", "topic": "sensor.data"}`
+* **Ping (Heartbeat):** Keep the connection alive.
+    * *Send:* `{"action": "ping"}`
+    * *Receive:* `{"status": "pong"}`
+
+When messages arrive on a subscribed topic, the broker pushes them instantly. Note: The `payload` field is natively encoded in **Base64** to remain binary-safe across ecosystems. You must decode it (e.g., using `atob()` in JS) upon receipt.
+
 ### Live Streaming (Server-Sent Events)
 
 **Endpoint:** `GET /stream/{topic}`

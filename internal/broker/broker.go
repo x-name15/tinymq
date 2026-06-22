@@ -51,6 +51,7 @@ type TopicStat struct {
 }
 
 var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
+var validWildcardRegex = regexp.MustCompile(`^([a-zA-Z0-9._:-]+\*|\*)$`)
 
 func New(store *storage.DiskStorage) *Broker {
 	dialer := &net.Dialer{
@@ -242,6 +243,7 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		select {
 		case spy <- msg:
 		default:
+			log.Printf("[WS/SSE] Spy buffer full for topic '%s', message %s dropped\n", t.Name, msg.ID)
 		}
 	}
 	t.mu.Unlock()
@@ -252,6 +254,7 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 			select {
 			case spy <- msg:
 			default:
+				log.Printf("[WS/SSE] Spy buffer full for topic '%s', message %s dropped\n", wildcardT.Name, msg.ID)
 			}
 		}
 		wildcardT.mu.Unlock()
@@ -368,54 +371,47 @@ func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
 }
 
 func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Message) ([]message.Message, bool) {
-	cleanName := strings.ReplaceAll(topicName, "*", "")
-	if len(cleanName) > 0 && !validTopicRegex.MatchString(cleanName) {
+	if len(topicName) > 0 && !b.IsValidTopicName(topicName) {
 		return nil, false
 	}
+
 	b.mu.Lock()
+	var reg *regexp.Regexp
+	var matchingTopics []*Topic
 
-	if !strings.Contains(topicName, "*") {
-		if _, exists := b.Topics[topicName]; !exists {
-			if len(b.Topics) >= getMaxTopics() {
-				b.mu.Unlock()
-				return nil, false
+	if strings.Contains(topicName, "*") {
+		var exists bool
+		reg, exists = b.compiledRegex[topicName]
+		if !exists {
+			regexPattern := "^" + strings.ReplaceAll(topicName, "*", ".*") + "$"
+			compiled, err := regexp.Compile(regexPattern)
+			if err == nil {
+				reg = compiled
+				b.compiledRegex[topicName] = reg
 			}
-			t := &Topic{Name: topicName}
-			b.Topics[topicName] = t
-		}
-		t := b.Topics[topicName]
-		b.mu.Unlock()
-
-		t.mu.Lock()
-		defer t.mu.Unlock()
-
-		results := b.extractMessages(t, limit)
-		if len(results) > 0 {
-			return results, true
 		}
 
-		t.waitingConsumers = append(t.waitingConsumers, notifyChan)
-		return nil, false
+		if reg != nil {
+			for name, t := range b.Topics {
+				if reg.MatchString(name) {
+					matchingTopics = append(matchingTopics, t)
+				}
+			}
+		}
 	}
 
-	reg, exists := b.compiledRegex[topicName]
-	if !exists {
-		regexPattern := "^" + strings.ReplaceAll(topicName, "*", ".*") + "$"
-		compiled, err := regexp.Compile(regexPattern)
-		if err != nil {
+	if _, exists := b.Topics[topicName]; !exists {
+		if len(b.Topics) >= getMaxTopics() {
 			b.mu.Unlock()
 			return nil, false
 		}
-		reg = compiled
-		b.compiledRegex[topicName] = reg
-	}
-
-	var matchingTopics []*Topic
-	for name, t := range b.Topics {
-		if reg != nil && reg.MatchString(name) {
-			matchingTopics = append(matchingTopics, t)
+		t := &Topic{Name: topicName}
+		b.Topics[topicName] = t
+		if strings.Contains(topicName, "*") {
+			b.wildcards[topicName] = t
 		}
 	}
+	targetTopic := b.Topics[topicName]
 	b.mu.Unlock()
 
 	for _, t := range matchingTopics {
@@ -428,24 +424,48 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 		}
 	}
 
-	b.mu.Lock()
-	if _, exists := b.Topics[topicName]; !exists {
-		if len(b.Topics) >= getMaxTopics() {
-			b.mu.Unlock()
-			return nil, false
-		}
-		t := &Topic{Name: topicName}
-		b.Topics[topicName] = t
-		b.wildcards[topicName] = t
+	targetTopic.mu.Lock()
+	defer targetTopic.mu.Unlock()
+
+	results := b.extractMessages(targetTopic, limit)
+	if len(results) > 0 {
+		return results, true
 	}
-	wildcardTopic := b.Topics[topicName]
-	b.mu.Unlock()
 
-	wildcardTopic.mu.Lock()
-	wildcardTopic.waitingConsumers = append(wildcardTopic.waitingConsumers, notifyChan)
-	wildcardTopic.mu.Unlock()
-
+	targetTopic.waitingConsumers = append(targetTopic.waitingConsumers, notifyChan)
 	return nil, false
+}
+
+func (b *Broker) GetStats() ([]TopicStat, int) {
+	b.mu.RLock()
+	topicsCopy := make(map[string]*Topic, len(b.Topics))
+	for k, v := range b.Topics {
+		topicsCopy[k] = v
+	}
+	webhooksCopy := make(map[string][]string, len(b.webhooks))
+	for k, v := range b.webhooks {
+		webhooksCopy[k] = v
+	}
+	b.mu.RUnlock()
+
+	totalWebhooks := 0
+	for _, urls := range webhooksCopy {
+		totalWebhooks += len(urls)
+	}
+
+	stats := make([]TopicStat, 0, len(topicsCopy))
+	for name, t := range topicsCopy {
+		_, hasWebhook := webhooksCopy[name]
+		stats = append(stats, TopicStat{
+			Name:             name,
+			MessageCount:     len(t.Messages),
+			WaitingConsumers: len(t.waitingConsumers),
+			IsDLQ:            strings.HasSuffix(name, ".dlq"),
+			HasWebhooks:      hasWebhook,
+		})
+	}
+
+	return stats, totalWebhooks
 }
 
 func (b *Broker) RemoveWaitingConsumer(topicName string, notifyChan chan message.Message) {
@@ -500,40 +520,6 @@ func (b *Broker) Ack(topicName string, msgID string) bool {
 	}
 
 	return false
-}
-
-func (b *Broker) GetStats() ([]TopicStat, int) {
-	b.mu.RLock()
-	topicsCopy := make(map[string]*Topic, len(b.Topics))
-	for k, v := range b.Topics {
-		topicsCopy[k] = v
-	}
-	webhooksCopy := make(map[string][]string, len(b.webhooks))
-	for k, v := range b.webhooks {
-		webhooksCopy[k] = v
-	}
-	b.mu.RUnlock()
-
-	totalWebhooks := 0
-	for _, urls := range webhooksCopy {
-		totalWebhooks += len(urls)
-	}
-
-	stats := make([]TopicStat, 0, len(topicsCopy))
-	for name, t := range topicsCopy {
-		t.mu.Lock()
-		_, hasWebhook := webhooksCopy[name]
-		stats = append(stats, TopicStat{
-			Name:             name,
-			MessageCount:     len(t.Messages),
-			WaitingConsumers: len(t.waitingConsumers),
-			IsDLQ:            strings.HasSuffix(name, ".dlq"),
-			HasWebhooks:      hasWebhook,
-		})
-		t.mu.Unlock()
-	}
-
-	return stats, totalWebhooks
 }
 
 func (b *Broker) Requeue(msg message.Message) {
@@ -641,7 +627,7 @@ func (b *Broker) Peek(topicName string, limit int) []message.Message {
 }
 
 func (b *Broker) IsValidTopicName(name string) bool {
-	return validTopicRegex.MatchString(name)
+	return validTopicRegex.MatchString(name) || validWildcardRegex.MatchString(name)
 }
 
 func (b *Broker) TopicExists(name string) bool {
@@ -739,10 +725,18 @@ func (b *Broker) IsIdempotent(key string) bool {
 	return false
 }
 
-func (b *Broker) AddSpy(topicName string) chan message.Message {
+func (b *Broker) AddSpy(topicName string) (chan message.Message, error) {
+	if !b.IsValidTopicName(topicName) {
+		return nil, errors.New("invalid topic name")
+	}
+
 	b.mu.Lock()
 	t, exists := b.Topics[topicName]
 	if !exists {
+		if len(b.Topics) >= getMaxTopics() {
+			b.mu.Unlock()
+			return nil, errors.New("broker maximum topic limit reached")
+		}
 		t = &Topic{Name: topicName}
 		b.Topics[topicName] = t
 		if strings.Contains(topicName, "*") {
@@ -756,7 +750,7 @@ func (b *Broker) AddSpy(topicName string) chan message.Message {
 
 	ch := make(chan message.Message, 50)
 	t.spies = append(t.spies, ch)
-	return ch
+	return ch, nil
 }
 
 func (b *Broker) RemoveSpy(topicName string, ch chan message.Message) {

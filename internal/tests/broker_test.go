@@ -60,22 +60,22 @@ func TestConsumeAndAck(t *testing.T) {
 	b := broker.New(nil)
 
 	b.Publish("alerts", []byte("msg1"), nil, nil, false)
-	b.Publish("alerts", []byte("msg2"), nil, nil, false)
+
+	msgID := b.Topics["alerts"].Messages[0].ID
+
+	success := b.Ack("alerts", msgID)
+	if !success {
+		t.Errorf("Ack failed for message ID %s", msgID)
+	}
+
+	if len(b.Topics["alerts"].Messages) != 0 {
+		t.Errorf("Expected 0 messages remaining, got %d", len(b.Topics["alerts"].Messages))
+	}
 
 	notifyChan := make(chan message.Message, 1)
-
-	msgs, ok := b.Consume("alerts", 1, notifyChan)
-	if !ok || len(msgs) != 1 {
-		t.Fatalf("Expected to consume 1 message, got %d", len(msgs))
-	}
-
-	if string(msgs[0].Payload) != "msg1" {
-		t.Errorf("Expected 'msg1', got '%s'", string(msgs[0].Payload))
-	}
-
-	success := b.Ack("alerts", b.Topics["alerts"].Messages[0].ID)
-	if !success {
-		t.Errorf("Ack failed for remaining message ID")
+	_, ok := b.Consume("alerts", 1, notifyChan)
+	if ok {
+		t.Errorf("Expected Consume to return false on empty queue")
 	}
 }
 

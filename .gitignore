@@ -1,6 +1,17 @@
-#Ignore 
+#Ignore creds
 .env
+
+# Ignore logs inside Data
+data/*.log
+
+#Examples
 /examples/
+
+#Build
 tinymq.exe
+
+#Repomix
 repomix-output.xml
+
+#Local Actions
 .github/workflows/local.test.yaml

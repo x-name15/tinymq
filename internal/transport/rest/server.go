@@ -90,7 +90,7 @@ func NewServer(b *broker.Broker, port string, version string) *Server {
 
 	// WebSockets (Protocol TMP-WS)
 	wsServer := ws.NewServer(b)
-	mux.HandleFunc("/ws", wsServer.HandleWS)
+	mux.HandleFunc("/ws", s.withAuth(wsServer.HandleWS))
 
 	return s
 }
@@ -117,6 +117,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		// 1. Bearer Header (REST)
 		authHeader := r.Header.Get("Authorization")
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			got := strings.TrimPrefix(authHeader, "Bearer ")
@@ -126,10 +127,19 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
+		// 2. Basic Auth (Dashboard)
 		_, pwd, ok := r.BasicAuth()
 		if ok && subtle.ConstantTimeCompare([]byte(pwd), []byte(token)) == 1 {
 			next(w, r)
 			return
+		}
+
+		// 3. Query Param (WebSocket)
+		if got := r.URL.Query().Get("token"); got != "" {
+			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
+				next(w, r)
+				return
+			}
 		}
 
 		w.Header().Set("WWW-Authenticate", `Basic realm="TinyMQ Secure Dashboard"`)
@@ -426,7 +436,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spyChan := s.broker.AddSpy(topic)
+	spyChan, err := s.broker.AddSpy(topic)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	ctx := r.Context()
 	defer s.broker.RemoveSpy(topic, spyChan)
 
