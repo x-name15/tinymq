@@ -98,7 +98,7 @@ func main() {
 	}
 
 	restServer := rest.NewServer(b, port, Version)
-	
+
 	go func() {
 		if err := restServer.Start(); err != nil {
 			log.Fatalf("Failed to start REST server: %v", err)

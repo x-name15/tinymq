@@ -42,7 +42,7 @@ func NewServer(b *broker.Broker, port string, version string) *Server {
 	}
 
 	mux := http.NewServeMux()
-	
+
 	// Core API
 	mux.HandleFunc("/publish/", s.withAuth(s.handlePublish))
 	mux.HandleFunc("/consume/", s.withAuth(s.handleConsume))
@@ -51,7 +51,7 @@ func NewServer(b *broker.Broker, port string, version string) *Server {
 	mux.HandleFunc("/webhook/", s.withAuth(s.handleRegisterWebhook))
 	mux.HandleFunc("/api/topics", s.withAuth(s.handleCreateTopic))
 	mux.HandleFunc("/stream/", s.withAuth(s.handleStream))
-	
+
 	// UI & Telemetry
 	mux.HandleFunc("/dashboard", s.withAuth(s.handleDashboard))
 	mux.HandleFunc("/metrics", s.withAuth(s.handleMetrics))
@@ -270,7 +270,7 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Topic and Message ID required", http.StatusBadRequest)
 		return
 	}
-	
+
 	if !s.broker.Ack(parts[2], parts[3]) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -309,7 +309,9 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload struct{ URL string `json:"url"` }
+	var payload struct {
+		URL string `json:"url"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.URL == "" {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
@@ -439,7 +441,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // -- Queue UI API --
-func (s *Server) handleListQueues(w http.ResponseWriter, _ *http.Request) { 
+func (s *Server) handleListQueues(w http.ResponseWriter, _ *http.Request) {
 	stats, _ := s.broker.GetStats()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
@@ -485,7 +487,9 @@ func (s *Server) handleQueuePublish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQueueConsume(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Queue string `json:"queue"` }
+	var req struct {
+		Queue string `json:"queue"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Queue == "" {
 		http.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
