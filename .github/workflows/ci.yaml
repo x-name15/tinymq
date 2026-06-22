@@ -1,8 +1,8 @@
-name: TinyMQ CI / Release Gate
+name: TinyMQ CI Gate / Release Gate
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "feature/*" ]
   pull_request:
     branches: [ "main" ]
 
