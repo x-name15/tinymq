@@ -13,6 +13,7 @@ import (
 	"github.com/x-name15/tinymq/internal/broker"
 	"github.com/x-name15/tinymq/internal/helper"
 	"github.com/x-name15/tinymq/internal/storage"
+	"github.com/x-name15/tinymq/internal/transport/mqtt"
 	"github.com/x-name15/tinymq/internal/transport/rest"
 )
 
@@ -41,6 +42,7 @@ func main() {
 		for _, file := range files {
 			if !file.IsDir() && filepath.Ext(file.Name()) == ".log" {
 				topicName := strings.TrimSuffix(file.Name(), ".log")
+				topicName = strings.ReplaceAll(topicName, "@", "/")
 				topicsToRecover = append(topicsToRecover, topicName)
 			}
 		}
@@ -97,11 +99,23 @@ func main() {
 		port = "7800"
 	}
 
+	mqttPort := os.Getenv("TINYMQ_MQTT_PORT")
+	if mqttPort == "" {
+		mqttPort = "1883"
+	}
+
 	restServer := rest.NewServer(b, port, Version)
+	mqttServer := mqtt.NewServer(b)
 
 	go func() {
 		if err := restServer.Start(); err != nil {
 			log.Fatalf("Failed to start REST server: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := mqttServer.Start(mqttPort); err != nil {
+			log.Fatalf("Failed to start MQTT server: %v", err)
 		}
 	}()
 
@@ -115,9 +129,10 @@ func main() {
 	defer cancelShutdown()
 
 	if err := restServer.Stop(ctxShutdown); err != nil {
-		log.Fatalf("Forced shutdown: %v", err)
+		log.Printf("Forced REST shutdown: %v\n", err)
 	}
 
+	mqttServer.Stop()
 	store.CloseAll()
 	log.Println("TinyMQ stopped.")
 }

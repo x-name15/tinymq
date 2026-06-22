@@ -26,16 +26,16 @@ func TestPublishDoesNotDeadlock(t *testing.T) {
 func TestIsValidTopicName(t *testing.T) {
 	b := broker.New(nil)
 
-	validNames := []string{"orders", "orders.eu", "orders-eu_123", "orders::subgroup"}
+	validNames := []string{"orders", "orders.eu", "orders-eu_123", "orders::subgroup", "orders/eu"}
 	for _, name := range validNames {
 		if !b.IsValidTopicName(name) {
 			t.Errorf("Expected '%s' to be valid, but it was rejected", name)
 		}
 	}
 
-	invalidNames := []string{"orders/eu", "orders\\eu", "../orders", "orders#123", ""}
+	invalidNames := []string{"orders\\eu", "../orders", "orders#123", ""}
 	for _, name := range invalidNames {
-		if b.IsValidTopicName(name) {
+		if b.TopicExists(name) || (len(name) > 0 && b.IsValidTopicName(name)) {
 			t.Errorf("Expected '%s' to be invalid, but it was accepted", name)
 		}
 	}

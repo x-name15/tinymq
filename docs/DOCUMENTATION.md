@@ -200,6 +200,17 @@ Visit `http://127.0.0.1:7800/dashboard` to access the interactive web interface.
 - Real-time waiting consumers tracking.
 
 ---
+## MQTT Gateway (IoT)
+
+TinyMQ features a native MQTT v3.1.1 gateway on TCP port `1883` (configurable via `TINYMQ_MQTT_PORT`). This allows embedded microcontrollers, Arduinos, and IoT sensors to stream data directly into the broker with absolute minimum overhead.
+
+### Authentication
+When `TINYMQ_API_KEY` is active, IoT clients must present the token inside the **Password** field of the MQTT connection frame. Connections with missing or incorrect tokens are immediately rejected with error code `0x05` (Not Authorized).
+
+### Topic Mapping
+MQTT topic layers are fully compatible with TinyMQ's core wildcard architecture. The multi-level MQTT wildcard `#` is automatically translated to TinyMQ's internal global wildcard `*`.
+
+---
 
 ## tmq CLI
 

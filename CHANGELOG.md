@@ -3,6 +3,14 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.7.0] - 2026-06-22 — The Internet of Things (MQTT) Update
+
+### Added
+- **Native MQTT v3.1.1 Support:** Built a high-performance, zero-dependency MQTT gateway listening on TCP port `1883`. Seamlessly handles binary streams for `CONNECT`, `SUBSCRIBE`, `PUBLISH`, `PINGREQ`, and `DISCONNECT` packets.
+- **Cross-Protocol Integration:** Messages published from MQTT are instantly routable to HTTP/WebSockets clients, and vice versa.
+- **Embedded Security:** Fully protected by `TINYMQ_API_KEY`. The engine uses constant-time byte comparisons against the MQTT Password field to block illegitimate IoT devices before handshake acceptance.
+
+---
 ## [2.6.0] - 2026-06-22 — The Native WebSocket & Performance Update
 
 ## Added

@@ -2,6 +2,7 @@ package tests
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -100,5 +101,46 @@ func TestStorageCompaction(t *testing.T) {
 
 	if loadedMsgs[0].ID != "msg-survivor" {
 		t.Errorf("Survivor message got corrupted or lost during compaction")
+	}
+}
+
+// Validate that topics with slashes (MQTT style) are safely flat-mapped to '@' in disk
+func TestStorageSlashFlatMapping(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "tinymq_test_slashes_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	store, err := storage.New(tempDir, false)
+	if err != nil {
+		t.Fatalf("Failed to initialize storage: %v", err)
+	}
+
+	topic := "infra/sensores/temperatura"
+	msg := message.Message{
+		ID:        "msg-iot-999",
+		Topic:     topic,
+		Payload:   []byte("flat-mapped content"),
+		Timestamp: time.Now(),
+	}
+
+	err = store.AppendPut(topic, msg)
+	if err != nil {
+		t.Fatalf("Storage rejected slash path write: %v", err)
+	}
+
+	expectedFile := filepath.Join(tempDir, "infra@sensores@temperatura.log")
+	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
+		t.Errorf("Expected flat file '%s' to exist, but it was not found on disk", expectedFile)
+	}
+
+	loadedMsgs, err := store.LoadMessages(topic)
+	if err != nil {
+		t.Fatalf("Failed to load messages with slashes: %v", err)
+	}
+
+	if len(loadedMsgs) != 1 || string(loadedMsgs[0].Payload) != "flat-mapped content" {
+		t.Errorf("Data corruption or loss during flat-mapped recovery")
 	}
 }

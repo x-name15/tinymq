@@ -50,8 +50,8 @@ type TopicStat struct {
 	HasWebhooks      bool
 }
 
-var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
-var validWildcardRegex = regexp.MustCompile(`^([a-zA-Z0-9._:-]+\*|\*)$`)
+var validTopicRegex = regexp.MustCompile(`^[a-zA-Z0-9._:\-/]+$`)
+var validWildcardRegex = regexp.MustCompile(`^([a-zA-Z0-9._:\-/]+\*|\*)$`)
 
 func New(store *storage.DiskStorage) *Broker {
 	dialer := &net.Dialer{
@@ -627,6 +627,9 @@ func (b *Broker) Peek(topicName string, limit int) []message.Message {
 }
 
 func (b *Broker) IsValidTopicName(name string) bool {
+	if strings.Contains(name, "..") {
+		return false
+	}
 	return validTopicRegex.MatchString(name) || validWildcardRegex.MatchString(name)
 }
 

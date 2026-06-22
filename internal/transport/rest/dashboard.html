@@ -473,7 +473,7 @@
         async function createNewTopic() {
             const topicName = prompt("Enter Queue/Topic name (e.g., 'orders.process'):");
             if (!topicName || topicName.trim() === "") return;
-            const validRegex = /^[a-zA-Z0-9._-]+$/;
+            const validRegex = /^[a-zA-Z0-9._:\-\/]+$/;
             
             if (!validRegex.test(topicName.trim())) {
                 showToast("Invalid name format.", true);
