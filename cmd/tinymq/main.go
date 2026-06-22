@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/x-name15/tinymq/internal/broker"
+	"github.com/x-name15/tinymq/internal/cluster"
 	"github.com/x-name15/tinymq/internal/helper"
 	"github.com/x-name15/tinymq/internal/storage"
 	"github.com/x-name15/tinymq/internal/transport/mqtt"
@@ -92,51 +93,66 @@ func main() {
 			}
 		}
 	}()
-
-	// Initializing Transports (Ports & Adapters)
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "7800"
-	}
-
-	mqttPort := os.Getenv("TINYMQ_MQTT_PORT")
-	if mqttPort == "" {
-		mqttPort = "1883"
-	}
-
-	restServer := rest.NewServer(b, port, Version)
-	var mqttServer *mqtt.Server
-	if mqttPort != "" {
-		mqttServer = mqtt.NewServer(b)
+	
+	// --- CLUSTERING SYSTEM ---
+	clusterAddr := os.Getenv("TINYMQ_CLUSTER_ADDR")
+	var clusterNode *cluster.Node
+	if clusterAddr != "" {
+		clusterNode = cluster.NewNode(clusterAddr)
 		go func() {
-			if err := mqttServer.Start(mqttPort); err != nil {
-				log.Fatalf("Failed to start MQTT server: %v", err)
+			if err := clusterNode.Start(); err != nil {
+				log.Fatalf("Failed to start cluster node: %v", err)
 			}
 		}()
 	} else {
-		log.Println("MQTT server disabled (TINYMQ_MQTT_PORT not set)")
+		log.Println("Clustering disabled (TINYMQ_CLUSTER_ADDR not set)")
 	}
 
-	go func() {
-		if err := restServer.Start(); err != nil {
-			log.Fatalf("Failed to start REST server: %v", err)
-		}
-	}()
+	// Initializing Transports (Ports & Adapters)
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "7800"
+    }
 
-	go func() {
-		if err := mqttServer.Start(mqttPort); err != nil {
-			log.Fatalf("Failed to start MQTT server: %v", err)
-		}
-	}()
+    // NUEVO: Flag explícito para deshabilitar MQTT si se desea
+    mqttDisabled := os.Getenv("TINYMQ_MQTT_DISABLE") == "true"
+    mqttPort := os.Getenv("TINYMQ_MQTT_PORT")
+    if mqttPort == "" && !mqttDisabled {
+        mqttPort = "1883"
+    }
 
-	// Graceful Shutdown
-	quit := make(chan os.Signal, 1)
+    restServer := rest.NewServer(b, port, Version)
+    var mqttServer *mqtt.Server
+    
+    if mqttPort != "" && !mqttDisabled {
+        mqttServer = mqtt.NewServer(b)
+        go func() {
+            if err := mqttServer.Start(mqttPort); err != nil {
+                log.Fatalf("Failed to start MQTT server: %v", err)
+            }
+        }()
+    } else {
+        log.Println("MQTT server disabled natively via configuration.")
+    }
+
+    go func() {
+        if err := restServer.Start(); err != nil {
+            log.Fatalf("Failed to start REST server: %v", err)
+        }
+    }()
+
+    // Graceful Shutdown
+    quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Println("Shutting down TinyMQ gracefully...")
 	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
+
+	if clusterNode != nil {
+		clusterNode.Stop()
+	}
 
 	if err := restServer.Stop(ctxShutdown); err != nil {
 		log.Printf("Forced REST shutdown: %v\n", err)
