@@ -11,6 +11,8 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
 
+RUN mkdir -p /home/tinymq/data && chown 10001:10001 /home/tinymq/data
+
 # === Phase 2 ===
 FROM scratch
 
@@ -21,7 +23,7 @@ WORKDIR /home/tinymq/
 
 COPY --from=builder --chown=10001:10001 /app/tinymq .
 
-RUN mkdir -p /home/tinymq/data && chown 10001:10001 /home/tinymq/data
+COPY --from=builder --chown=10001:10001 /home/tinymq/data ./data
 
 USER 10001
 
