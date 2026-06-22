@@ -2,7 +2,7 @@ name: TinyMQ Release Pipeline
 
 on:
   workflow_run:
-    workflows: ["TinyMQ CI / Release Gate"]
+    workflows: ["TinyMQ CI Gate / Release Gate"]
     types:
       - completed
     branches:
