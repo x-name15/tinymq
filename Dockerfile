@@ -24,7 +24,7 @@ COPY --from=builder --chown=10001:10001 /app/tinymq .
 RUN mkdir -p /home/tinymq/data && chown 10001:10001 /home/tinymq/data
 
 USER 10001
-# Exponemos HTTP y MQTT
+
 EXPOSE 7800 1883
 
 CMD ["./tinymq"]
