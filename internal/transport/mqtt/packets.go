@@ -8,40 +8,37 @@ import (
 
 // MQTT Control Packet Types
 const (
-	PacketConnect    = 1
-	PacketConnAck    = 2
-	PacketPublish    = 3
-	PacketPubAck     = 4
-	PacketSubscribe  = 8
-	PacketSubAck     = 9
-	PacketUnsubscribe  = 10
-	PacketUnsubAck     = 11
-	PacketPingReq    = 12
-	PacketPingResp   = 13
-	PacketDisconnect = 14
-	
+	PacketConnect     = 1
+	PacketConnAck     = 2
+	PacketPublish     = 3
+	PacketPubAck      = 4
+	PacketSubscribe   = 8
+	PacketSubAck      = 9
+	PacketUnsubscribe = 10
+	PacketUnsubAck    = 11
+	PacketPingReq     = 12
+	PacketPingResp    = 13
+	PacketDisconnect  = 14
 )
 
 func readRemainingLength(r io.Reader) (int, error) {
-	var multiplier = 1
-	var value = 0
-	var buf = make([]byte, 1)
+	multiplier := 1
+	value := 0
+	buf := make([]byte, 1)
 
-	for {
+	for i := 0; i < 4; i++ {
 		if _, err := io.ReadFull(r, buf); err != nil {
 			return 0, err
 		}
 		encodedByte := buf[0]
-		value += int(encodedByte&127) * multiplier
-		if multiplier > 128*128*128 {
-			return 0, errors.New("malformed remaining length")
+		value += int(encodedByte&0x7F) * multiplier
+
+		if (encodedByte & 0x80) == 0 {
+			return value, nil
 		}
 		multiplier *= 128
-		if (encodedByte & 128) == 0 {
-			break
-		}
 	}
-	return value, nil
+	return 0, errors.New("malformed remaining length: exceeded 4 bytes")
 }
 
 func writeRemainingLength(value int) []byte {

@@ -43,13 +43,13 @@ func TestMqttConnectAndPing(t *testing.T) {
 	defer conn.Close()
 
 	connectPacket := []byte{
-		0x10, 
-		12,   
+		0x10, // Type Connect
+		13,
 		0x00, 4, 'M', 'Q', 'T', 'T',
-		4,        
-		0x02,     
-		0x00, 60, 
-		0x00, 1, 'T', 
+		4,        // Level v3.1.1
+		0x02,     // Flags (Clean Session)
+		0x00, 60, // KeepAlive
+		0x00, 1, 'T', // ClientID length + "T"
 	}
 
 	conn.Write(connectPacket)
@@ -79,11 +79,11 @@ func TestMqttPubSub(t *testing.T) {
 	defer conn.Close()
 
 	subPacket := []byte{
-		0x82,       
-		5,          
-		0x00, 0x01, 
+		0x82,
+		6,
+		0x00, 0x01,
 		0x00, 1, 'a',
-		0x00, 
+		0x00,
 	}
 	conn.Write(subPacket)
 
@@ -91,10 +91,10 @@ func TestMqttPubSub(t *testing.T) {
 	io.ReadFull(conn, subAck) // Leer SUBACK
 
 	pubPacket := []byte{
-		0x30,         
-		5,            
-		0x00, 1, 'a', 
-		'h', 'i', 
+		0x30,
+		5,
+		0x00, 1, 'a',
+		'h', 'i',
 	}
 	conn.Write(pubPacket)
 
@@ -109,7 +109,7 @@ func TestMqttPubSub(t *testing.T) {
 func dialMqttAndConnect(t *testing.T, port string) net.Conn {
 	conn, _ := net.Dial("tcp", "127.0.0.1:"+port)
 	connectPacket := []byte{
-		0x10, 12,
+		0x10, 13,
 		0x00, 4, 'M', 'Q', 'T', 'T',
 		4, 0x02, 0x00, 60,
 		0x00, 1, 'T',

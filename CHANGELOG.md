@@ -10,6 +10,30 @@ All notable changes of the proyect will be documented on this file.
 - **Cross-Protocol Integration:** Messages published from MQTT are instantly routable to HTTP/WebSockets clients, and vice versa.
 - **Embedded Security:** Fully protected by `TINYMQ_API_KEY`. The engine uses constant-time byte comparisons against the MQTT Password field to block illegitimate IoT devices before handshake acceptance.
 
+### Security
+- **MQTT OOM Protection:** Enforced a strict 2MB limit on incoming MQTT control packets to prevent malicious clients from exhausting server RAM via artificially inflated `RemainingLength` headers.
+- **TCP Socket Thread-Safety:** Implemented a thread-safe connection wrapper (`mqttConn`) equipped with a dedicated Mutex to prevent data races and stream corruption during concurrent MQTT frame writes.
+- **Protocol Downgrade/Bypass Prevention:** The broker now explicitly rejects MQTT `CONNECT` frames that set the Password flag without the Username flag, strictly enforcing MQTT 3.1.1 §3.1.2.9 and preventing potential authentication bypasses.
+- **Strict Path Traversal Shield:** Hardened the `isSafePath` storage validator to reject absolute paths (`/`) and bypass attempts (`@`), ensuring logs are strictly confined to the `./data` directory.
+- **Telemetry Race Condition:** Fixed a silent data race in the `/api/stats` endpoint where queue sizes were read outside of their respective mutexes.
+- **Dynamic API Authentication:** The API token is now evaluated per-request rather than at startup, allowing for live credential rotation without requiring a broker restart.
+
+### Fixed
+- **Goroutine Leak in MQTT:** The MQTT `UNSUBSCRIBE` command now correctly removes the client from the broker's spy list and cleans up channels, completely eliminating memory and goroutine leaks.
+- **Spec-Compliant MQTT Parser:** Rewrote the `readRemainingLength` decoder to strictly cap at 4 bytes and prevent silent integer overflows on 32-bit architectures, adhering perfectly to the OASIS specification.
+- **REST API Sincerity:** Fixed the `/publish` HTTP endpoint to correctly propagate underlying broker errors (e.g., `429 Too Many Requests` on full capacity) instead of blindly returning `202 Accepted`. Additionally, `/consume` now returns standard `204 No Content` for empty queues instead of `404 Not Found`.
+- **DLQ Memory Limits:** The `/requeue` endpoint and DLQ automatic routing now strictly respect the `TINYMQ_MAX_MESSAGES` RAM ceiling, protecting the host server from out-of-memory crashes during heavy retry loops.
+- **MQTT QoS 2 Rejection:** The broker now explicitly aborts connections attempting QoS 2 publishes instead of silently downgrading them, avoiding infinite client retry loops.
+- **Topic Delivery Accuracy:** Fixed a bug where MQTT clients subscribed via wildcards (e.g., `#`) would receive the wildcard string as the topic name instead of the actual origin topic of the message.
+- **MQTT Port Toggle:** The MQTT server can now be fully disabled by leaving `TINYMQ_MQTT_PORT` empty, saving resources for HTTP-only deployments.
+- **WebSocket Goroutine Leak:** Implemented a dedicated cancellation channel (c.done) to immediately terminate spy goroutines if a WebSocket client disconnects unexpectedly, preventing memory leaks.
+- **Docker Configuration:** Exposed the MQTT TCP port (1883) natively in docker-compose.yml to allow external IoT devices to route traffic to the containerized broker.
+
+### Performance & Reliability
+- **Large Payload Persistence:** Increased the internal `bufio.Scanner` buffer from 64KB to 4MB for disk operations (`LoadMessages` and `CompactLog`). The broker can now safely recover and compact 2MB JSON payloads without truncating lines.
+- **Lock Contention Reduction:** Optimized the `RemoveSpy` core method to use `RLock()` instead of `Lock()`, ensuring that WebSocket and MQTT client disconnects no longer block active publishers.
+- **Slowloris Attack Mitigation:** Enforced a strict 30-second read deadline on the initial MQTT TCP connection handshake to prevent malicious clients from starving server resources by holding sockets open indefinitely.
+
 ---
 ## [2.6.0] - 2026-06-22 — The Native WebSocket & Performance Update
 

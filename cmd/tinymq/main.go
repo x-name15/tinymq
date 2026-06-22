@@ -105,7 +105,17 @@ func main() {
 	}
 
 	restServer := rest.NewServer(b, port, Version)
-	mqttServer := mqtt.NewServer(b)
+	var mqttServer *mqtt.Server
+	if mqttPort != "" {
+		mqttServer = mqtt.NewServer(b)
+		go func() {
+			if err := mqttServer.Start(mqttPort); err != nil {
+				log.Fatalf("Failed to start MQTT server: %v", err)
+			}
+		}()
+	} else {
+		log.Println("MQTT server disabled (TINYMQ_MQTT_PORT not set)")
+	}
 
 	go func() {
 		if err := restServer.Start(); err != nil {
@@ -132,7 +142,9 @@ func main() {
 		log.Printf("Forced REST shutdown: %v\n", err)
 	}
 
-	mqttServer.Stop()
+	if mqttServer != nil {
+		mqttServer.Stop()
+	}
 	store.CloseAll()
 	log.Println("TinyMQ stopped.")
 }

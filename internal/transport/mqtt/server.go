@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/x-name15/tinymq/internal/broker"
 	"github.com/x-name15/tinymq/internal/message"
@@ -21,6 +22,18 @@ type Server struct {
 	listener net.Listener
 	quit     chan struct{}
 	wg       sync.WaitGroup
+}
+
+type mqttConn struct {
+	conn net.Conn
+	mu   sync.Mutex
+}
+
+func (mc *mqttConn) write(data []byte) error {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	_, err := mc.conn.Write(data)
+	return err
 }
 
 func NewServer(b *broker.Broker) *Server {
@@ -70,6 +83,7 @@ func (s *Server) handleClient(conn net.Conn) {
 	addr := conn.RemoteAddr().String()
 	log.Printf("[MQTT] (+) TCP Connection opened from %s", addr)
 
+	mc := &mqttConn{conn: conn}
 	var spies = make(map[string]chan message.Message)
 
 	defer func() {
@@ -79,6 +93,8 @@ func (s *Server) handleClient(conn net.Conn) {
 		conn.Close()
 		log.Printf("[MQTT] (-) TCP Connection closed for %s", addr)
 	}()
+
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	header := make([]byte, 1)
 	for {
@@ -98,6 +114,12 @@ func (s *Server) handleClient(conn net.Conn) {
 			return
 		}
 
+		const maxPacketSize = 2 << 20
+		if remLength > maxPacketSize {
+			log.Printf("[MQTT] Oversized packet from %s (%d bytes), dropping connection", addr, remLength)
+			return
+		}
+
 		payload := make([]byte, remLength)
 		if remLength > 0 {
 			if _, err := io.ReadFull(conn, payload); err != nil {
@@ -106,75 +128,81 @@ func (s *Server) handleClient(conn net.Conn) {
 			}
 		}
 
-		log.Printf("[MQTT] RX Packet: Type=%d, Flags=%d, Len=%d from %s", packetType, flags, remLength, addr)
-
-		if err := s.processPacket(conn, packetType, flags, payload, spies); err != nil {
+		if err := s.processPacket(mc, packetType, flags, payload, spies); err != nil {
 			log.Printf("[MQTT] Protocol error (%s): %v", addr, err)
 			return
 		}
 	}
 }
 
-func (s *Server) processPacket(conn net.Conn, pType, flags byte, payload []byte, spies map[string]chan message.Message) error {
+func (s *Server) processPacket(mc *mqttConn, pType, flags byte, payload []byte, spies map[string]chan message.Message) error {
 	switch pType {
 	case PacketConnect:
-		return s.handleConnect(conn, payload)
+		return s.handleConnect(mc, payload)
 	case PacketPublish:
-		return s.handlePublish(conn, flags, payload)
+		return s.handlePublish(mc, flags, payload)
 	case PacketSubscribe:
-		return s.handleSubscribe(conn, payload, spies)
+		return s.handleSubscribe(mc, payload, spies)
 	case PacketPingReq:
-		_, err := conn.Write([]byte{PacketPingResp << 4, 0x00})
-		return err
+		return mc.write([]byte{PacketPingResp << 4, 0x00})
 	case PacketDisconnect:
 		return errors.New("client disconnected gracefully")
 	case PacketUnsubscribe:
-		return s.handleUnsubscribe(conn, payload, spies)
+		return s.handleUnsubscribe(mc, payload, spies)
 	default:
 		return fmt.Errorf("unsupported packet type: %d", pType)
 	}
 }
 
-func (s *Server) handleConnect(conn net.Conn, payload []byte) error {
+func (s *Server) handleConnect(mc *mqttConn, payload []byte) error {
 	offset := 0
 	protoName, err := readString(payload, &offset)
 	if err != nil {
 		return fmt.Errorf("failed to read protocol name: %v", err)
 	}
-	
+
 	if protoName != "MQTT" && protoName != "MQIsdp" {
 		return fmt.Errorf("invalid protocol name: %s", protoName)
 	}
 
-	if offset+2 > len(payload) { return io.ErrUnexpectedEOF }
+	if offset+4 > len(payload) {
+		return io.ErrUnexpectedEOF
+	}
 	protoLevel := payload[offset] // Protocol version
-	
+
 	if protoLevel != 4 {
-		conn.Write([]byte{PacketConnAck << 4, 2, 0x00, 0x01})
-		return fmt.Errorf("unsupported MQTT version: %d (Only v3.1.1 supported. Check Postman settings!)", protoLevel)
+		mc.write([]byte{PacketConnAck << 4, 2, 0x00, 0x01})
+		return fmt.Errorf("unsupported MQTT version: %d", protoLevel)
 	}
 
 	connFlags := payload[offset+1]
-	offset += 2
-
-	// Skip KeepAlive (2 bytes)
-	offset += 2
+	offset += 4
 
 	clientID, err := readString(payload, &offset)
-	if err != nil { return err }
-	log.Printf("[MQTT] Client ID '%s' attempting handshake...", clientID)
+	if err != nil {
+		return err
+	}
 
 	var username, password string
 	hasUsername := (connFlags & 0x80) != 0
 	hasPassword := (connFlags & 0x40) != 0
 
+	if hasPassword && !hasUsername {
+		mc.write([]byte{PacketConnAck << 4, 2, 0x00, 0x04})
+		return fmt.Errorf("password flag set without username flag (MQTT 3.1.1 §3.1.2.9)")
+	}
+
 	if hasUsername {
 		username, err = readString(payload, &offset)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 	}
 	if hasPassword {
 		password, err = readString(payload, &offset)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 	}
 
 	token := os.Getenv("TINYMQ_API_KEY")
@@ -186,33 +214,40 @@ func (s *Server) handleConnect(conn net.Conn, payload []byte) error {
 			valid = true
 		}
 		if !valid {
-			conn.Write([]byte{PacketConnAck << 4, 2, 0x00, 0x05}) // 0x05 = Not Authorized
+			mc.write([]byte{PacketConnAck << 4, 2, 0x00, 0x05}) // 0x05 = Not Authorized
 			return errors.New("authentication failed")
 		}
 	}
 
 	log.Printf("[MQTT] Client '%s' successfully connected!", clientID)
-	_, err = conn.Write([]byte{PacketConnAck << 4, 2, 0x00, 0x00}) // 0x00 = Accepted
-	return err
+	return mc.write([]byte{PacketConnAck << 4, 2, 0x00, 0x00}) // 0x00 = Accepted
 }
 
-func (s *Server) handlePublish(conn net.Conn, flags byte, payload []byte) error {
+func (s *Server) handlePublish(mc *mqttConn, flags byte, payload []byte) error {
 	offset := 0
 	topic, err := readString(payload, &offset)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	qos := (flags >> 1) & 0x03
 	var packetID uint16
 
 	if qos > 0 {
-		if offset+2 > len(payload) { return io.ErrUnexpectedEOF }
+		if offset+2 > len(payload) {
+			return io.ErrUnexpectedEOF
+		}
 		packetID = binary.BigEndian.Uint16(payload[offset : offset+2])
 		offset += 2
 	}
 
+	if qos == 2 {
+		log.Printf("[MQTT] QoS 2 not supported, dropping message on topic '%s'", topic)
+		return fmt.Errorf("QoS 2 not supported")
+	}
+
 	msgPayload := payload[offset:]
-	log.Printf("[MQTT] Publishing to '%s', Payload Size: %d", topic, len(msgPayload))
-	
+
 	if err := s.broker.Publish(topic, msgPayload, nil, nil, false); err != nil {
 		log.Printf("[MQTT] Failed to publish to broker: %v", err)
 		return err
@@ -223,15 +258,16 @@ func (s *Server) handlePublish(conn net.Conn, flags byte, payload []byte) error 
 		response[0] = PacketPubAck << 4
 		response[1] = 2
 		binary.BigEndian.PutUint16(response[2:4], packetID)
-		_, err = conn.Write(response)
-		return err
+		return mc.write(response)
 	}
 	return nil
 }
 
-func (s *Server) handleSubscribe(conn net.Conn, payload []byte, spies map[string]chan message.Message) error {
+func (s *Server) handleSubscribe(mc *mqttConn, payload []byte, spies map[string]chan message.Message) error {
 	offset := 0
-	if offset+2 > len(payload) { return io.ErrUnexpectedEOF }
+	if offset+2 > len(payload) {
+		return io.ErrUnexpectedEOF
+	}
 	packetID := binary.BigEndian.Uint16(payload[offset : offset+2])
 	offset += 2
 
@@ -239,10 +275,14 @@ func (s *Server) handleSubscribe(conn net.Conn, payload []byte, spies map[string
 
 	for offset < len(payload) {
 		topic, err := readString(payload, &offset)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 
-		if offset >= len(payload) { return io.ErrUnexpectedEOF }
-		requestedQoS := payload[offset] 
+		if offset >= len(payload) {
+			return io.ErrUnexpectedEOF
+		}
+		requestedQoS := payload[offset]
 		offset++
 
 		cleanTopic := strings.ReplaceAll(topic, "#", "*")
@@ -253,16 +293,16 @@ func (s *Server) handleSubscribe(conn net.Conn, payload []byte, spies map[string
 		spyChan, err := s.broker.AddSpy(cleanTopic)
 		if err != nil {
 			log.Printf("[MQTT] Broker rejected subscription to '%s': %v", cleanTopic, err)
-			grantedQoS = append(grantedQoS, 0x80) 
+			grantedQoS = append(grantedQoS, 0x80)
 			continue
 		}
 
 		spies[cleanTopic] = spyChan
-		grantedQoS = append(grantedQoS, 0x00) 
+		grantedQoS = append(grantedQoS, 0x00)
 
-		go func(ch chan message.Message, tName string) {
+		go func(ch chan message.Message) {
 			for msg := range ch {
-				topicBytes := []byte(tName)
+				topicBytes := []byte(msg.Topic)
 				var varHeader []byte
 				varHeader = append(varHeader, byte(len(topicBytes)>>8), byte(len(topicBytes)))
 				varHeader = append(varHeader, topicBytes...)
@@ -273,11 +313,11 @@ func (s *Server) handleSubscribe(conn net.Conn, payload []byte, spies map[string
 				packet := append([]byte{PacketPublish << 4}, remLenBytes...)
 				packet = append(packet, totalPayload...)
 
-				if _, err := conn.Write(packet); err != nil {
+				if err := mc.write(packet); err != nil {
 					return
 				}
 			}
-		}(spyChan, topic)
+		}(spyChan)
 	}
 
 	subAckHeader := []byte{PacketSubAck << 4}
@@ -286,20 +326,32 @@ func (s *Server) handleSubscribe(conn net.Conn, payload []byte, spies map[string
 	packet = append(packet, byte(packetID>>8), byte(packetID))
 	packet = append(packet, grantedQoS...)
 
-	_, err := conn.Write(packet)
-	return err
+	return mc.write(packet)
 }
 
-func (s *Server) handleUnsubscribe(conn net.Conn, payload []byte, spies map[string]chan message.Message) error {
+func (s *Server) handleUnsubscribe(mc *mqttConn, payload []byte, spies map[string]chan message.Message) error {
 	if len(payload) < 2 {
 		return io.ErrUnexpectedEOF
 	}
-	
+
 	packetID := payload[0:2]
+	offset := 2
+
+	for offset < len(payload) {
+		topic, err := readString(payload, &offset)
+		if err != nil {
+			break
+		}
+		cleanTopic := strings.ReplaceAll(topic, "#", "*")
+		cleanTopic = strings.ReplaceAll(cleanTopic, "+", "*")
+
+		if ch, exists := spies[cleanTopic]; exists {
+			s.broker.RemoveSpy(cleanTopic, ch)
+			delete(spies, cleanTopic)
+			log.Printf("[MQTT] Client unsubscribed from '%s'", cleanTopic)
+		}
+	}
 
 	ack := []byte{PacketUnsubAck << 4, 2, packetID[0], packetID[1]}
-	_, err := conn.Write(ack)
-	
-	log.Printf("[MQTT] Client unsubscribed (PacketID: %d)", binary.BigEndian.Uint16(packetID))
-	return err
+	return mc.write(ack)
 }

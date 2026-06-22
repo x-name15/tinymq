@@ -104,7 +104,8 @@ If `limit=1` (Default), returns a single JSON object. If `limit > 1`, returns a 
 
 *(Binary payloads may be base64-encoded depending on your client.)*
 
-**Response (404):** When timeout expires and no message arrived.
+**Response (204):** When timeout expires and no message arrived. (No Content)
+*Note: Prior to v2.7.0, this returned a 404 Not Found.*
 
 ```json
 {
@@ -388,6 +389,7 @@ docker run -d \
 - `TINYMQ_MAX_MESSAGES`: Maximum number of messages held in `RAM` per topic (default `100000`).
 - `TINYMQ_API_KEY`: Secures the broker. If set, all endpoints (including the Dashboard) will require an `Authorization: Bearer  HTTP header`.
 - `TINYMQ_MAX_TOPICS`: Limits the maximum number of unique topics/queues allowed in memory (default `10000`) to protect against DoS attacks.
+- `TINYMQ_MQTT_PORT`: TCP port for the MQTT gateway (default `1883`). **Leave this completely empty to disable the MQTT server** and save resources if you only need HTTP/WS.
 
 ### Persistent data (Docker Compose)
 

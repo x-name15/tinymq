@@ -456,10 +456,16 @@ func (b *Broker) GetStats() ([]TopicStat, int) {
 	stats := make([]TopicStat, 0, len(topicsCopy))
 	for name, t := range topicsCopy {
 		_, hasWebhook := webhooksCopy[name]
+
+		t.mu.Lock()
+		msgCount := len(t.Messages)
+		consumerCount := len(t.waitingConsumers)
+		t.mu.Unlock()
+
 		stats = append(stats, TopicStat{
 			Name:             name,
-			MessageCount:     len(t.Messages),
-			WaitingConsumers: len(t.waitingConsumers),
+			MessageCount:     msgCount,
+			WaitingConsumers: consumerCount,
 			IsDLQ:            strings.HasSuffix(name, ".dlq"),
 			HasWebhooks:      hasWebhook,
 		})
@@ -557,6 +563,11 @@ func (b *Broker) Requeue(msg message.Message) {
 		t.waitingConsumers[0] = nil
 		t.waitingConsumers = t.waitingConsumers[1:]
 		consumerChan <- msg
+		return
+	}
+
+	if len(t.Messages) >= getMaxMessages() {
+		log.Printf("[Broker] Requeue rejected for topic '%s': capacity reached\n", targetTopic)
 		return
 	}
 

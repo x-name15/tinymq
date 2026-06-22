@@ -110,8 +110,8 @@ func (s *Server) Stop(ctx context.Context) error {
 // --- Middleware ---
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
-	token := os.Getenv("TINYMQ_API_KEY")
 	return func(w http.ResponseWriter, r *http.Request) {
+		token := os.Getenv("TINYMQ_API_KEY")
 		if token == "" {
 			next(w, r)
 			return
@@ -200,7 +200,16 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isBroadcast := r.URL.Query().Get("broadcast") == "true"
-	s.broker.Publish(topic, body, expiresAt, deliverAt, isBroadcast)
+	if err := s.broker.Publish(topic, body, expiresAt, deliverAt, isBroadcast); err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "capacity") || strings.Contains(err.Error(), "limit") {
+			status = http.StatusTooManyRequests
+		} else if strings.Contains(err.Error(), "invalid topic") {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
 
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintf(w, "{\"status\": \"accepted\", \"topic\": \"%s\"}\n", topic)
@@ -299,6 +308,11 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var msg message.Message
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
@@ -519,7 +533,7 @@ func (s *Server) handleQueueConsume(w http.ResponseWriter, r *http.Request) {
 	msgs, ok := s.broker.Consume(req.Queue, 1, notifyChan)
 
 	if !ok || len(msgs) == 0 {
-		s.broker.RemoveWaitingConsumer(req.Queue, notifyChan)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

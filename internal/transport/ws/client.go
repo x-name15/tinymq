@@ -25,6 +25,7 @@ type Client struct {
 	rw    *bufio.ReadWriter
 	mu    sync.Mutex
 	spies map[string]chan message.Message
+	done  chan struct{}
 }
 
 type WSCommand struct {
@@ -41,6 +42,7 @@ type wsResponse struct {
 
 func (c *Client) readPump() {
 	defer func() {
+		close(c.done)
 		c.mu.Lock()
 		for topic, ch := range c.spies {
 			c.hub.broker.RemoveSpy(topic, ch)
@@ -176,10 +178,18 @@ func (c *Client) handleCommand(raw []byte) {
 		c.sendJSON(wsResponse{Status: "subscribed", Topic: cmd.Topic})
 
 		go func(topic string, ch chan message.Message) {
-			for msg := range ch {
-				bytes, _ := json.Marshal(msg)
-				if err := c.sendMessage(string(bytes)); err != nil {
-					return // Stop goroutine if client disconnected
+			for {
+				select {
+				case msg, ok := <-ch:
+					if !ok {
+						return
+					}
+					bytes, _ := json.Marshal(msg)
+					if err := c.sendMessage(string(bytes)); err != nil {
+						return
+					}
+				case <-c.done:
+					return
 				}
 			}
 		}(cmd.Topic, spyChan)

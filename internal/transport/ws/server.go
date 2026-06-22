@@ -87,6 +87,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		conn:  conn,
 		rw:    bufrw,
 		spies: make(map[string]chan message.Message),
+		done:  make(chan struct{}),
 	}
 
 	s.AddClient(client)

@@ -45,7 +45,10 @@ func New(dataDir string, syncWrites bool) (*DiskStorage, error) {
 }
 
 func isSafePath(topic string) error {
-	if strings.Contains(topic, "..") || strings.Contains(topic, "\\") {
+	if strings.Contains(topic, "..") ||
+		strings.Contains(topic, "\\") ||
+		strings.HasPrefix(topic, "/") ||
+		strings.HasPrefix(topic, "@") {
 		return errors.New("unsafe topic name detected, path traversal aborted")
 	}
 	return nil
@@ -123,6 +126,8 @@ func (s *DiskStorage) LoadMessages(topic string) ([]message.Message, error) {
 	var orderedIDs []string
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4<<20), 4<<20)
+
 	for scanner.Scan() {
 		var rec LogRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
@@ -177,6 +182,8 @@ func (s *DiskStorage) CompactLog(topic string) error {
 	var orderedIDs []string
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4<<20), 4<<20)
+
 	for scanner.Scan() {
 		var rec LogRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
