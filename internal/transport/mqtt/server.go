@@ -368,7 +368,7 @@ func (s *Server) handleUnsubscribe(mc *mqttConn, payload []byte, spies map[strin
 		if err != nil {
 			break
 		}
-		
+
 		cleanTopic := translateMQTTWildcard(topic)
 
 		if ch, exists := spies[cleanTopic]; exists {

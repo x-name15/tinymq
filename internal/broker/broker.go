@@ -165,7 +165,7 @@ func (b *Broker) PublishReplicated(topicName string, payload []byte) error {
 }
 
 func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool, isReplication bool, depth int) error {
-	
+
 	if depth > 10 {
 		log.Printf("[Broker] SEC-ALERT: Binding loop or max depth detected resolving topic '%s'", topicName)
 		return errors.New("binding loop detected")
@@ -799,7 +799,7 @@ func (b *Broker) AddSpy(topicName string) (chan message.Message, error) {
 }
 
 func (b *Broker) RemoveSpy(topicName string, ch chan message.Message) {
-	b.mu.RLock() 
+	b.mu.RLock()
 	t, exists := b.Topics[topicName]
 	b.mu.RUnlock()
 	if !exists {

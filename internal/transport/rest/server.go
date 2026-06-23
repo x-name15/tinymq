@@ -26,7 +26,7 @@ import (
 	"github.com/x-name15/tinymq/internal/transport/ws"
 )
 
-//ProxyTransport
+// ProxyTransport
 var proxyTransport = &http.Transport{
 	MaxIdleConns:          100,
 	MaxIdleConnsPerHost:   100,
