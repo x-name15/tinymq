@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/x-name15/tinymq/internal/broker"
@@ -381,8 +382,8 @@ func (n *Node) Replicate(topic string, payload []byte) error {
 	mac := n.signMessage(body)
 	msg := fmt.Sprintf("%s %s\n", body, mac)
 
-	successCount := 1
-	var mu sync.Mutex
+	var successCount atomic.Int32
+	successCount.Store(1)
 
 	ackChan := make(chan struct{}, len(peers))
 
@@ -400,9 +401,7 @@ func (n *Node) Replicate(topic string, payload []byte) error {
 			resp, _ := reader.ReadString('\n')
 
 			if strings.TrimSpace(resp) == "REPLICATE_ACK" {
-				mu.Lock()
-				successCount++
-				mu.Unlock()
+				successCount.Add(1)
 				ackChan <- struct{}{}
 			}
 		}(addr)
@@ -412,15 +411,15 @@ func (n *Node) Replicate(topic string, payload []byte) error {
 	timeoutTimer := time.NewTimer(timeoutDuration)
 	defer timeoutTimer.Stop()
 
-	for successCount < quorum {
+	for successCount.Load() < int32(quorum) {
 		select {
 		case <-ackChan:
 		case <-timeoutTimer.C:
-			return fmt.Errorf("replication quorum timeout: %d/%d ACKs received within %v", successCount, len(n.Peers)+1, timeoutDuration)
+			return fmt.Errorf("replication quorum timeout: %d/%d ACKs received within %v", successCount.Load(), len(n.Peers)+1, timeoutDuration)
 		}
 	}
 
-	log.Printf("[Cluster] Message replicated to %d nodes (Quorum OK)\n", successCount)
+	log.Printf("[Cluster] Message replicated to %d nodes (Quorum OK)\n", successCount.Load())
 	return nil
 }
 
