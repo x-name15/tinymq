@@ -155,6 +155,11 @@ func (s *Server) processPacket(mc *mqttConn, pType, flags byte, payload []byte, 
 }
 
 func (s *Server) handleConnect(mc *mqttConn, payload []byte) error {
+	if len(payload) < 10 {
+		log.Printf("[MQTT] SEC-ALERT: Malformed CONNECT packet received (length %d). Dropping connection.", len(payload))
+		return errors.New("malformed CONNECT packet")
+	}
+
 	offset := 0
 	protoName, err := readString(payload, &offset)
 	if err != nil {
@@ -263,6 +268,19 @@ func (s *Server) handlePublish(mc *mqttConn, flags byte, payload []byte) error {
 	return nil
 }
 
+func translateMQTTWildcard(topic string) string {
+	if topic == "#" {
+		return "*"
+	}
+	if strings.HasSuffix(topic, "/#") {
+		return strings.ReplaceAll(topic, "/#", "/*")
+	}
+	if strings.Contains(topic, "+") {
+		return strings.ReplaceAll(topic, "+", "*")
+	}
+	return topic
+}
+
 func (s *Server) handleSubscribe(mc *mqttConn, payload []byte, spies map[string]chan message.Message) error {
 	offset := 0
 	if offset+2 > len(payload) {
@@ -285,8 +303,7 @@ func (s *Server) handleSubscribe(mc *mqttConn, payload []byte, spies map[string]
 		requestedQoS := payload[offset]
 		offset++
 
-		cleanTopic := strings.ReplaceAll(topic, "#", "*")
-		cleanTopic = strings.ReplaceAll(cleanTopic, "+", "*")
+		cleanTopic := translateMQTTWildcard(topic)
 
 		log.Printf("[MQTT] Client subscribing to '%s' (QoS: %d, translated to '%s')", topic, requestedQoS, cleanTopic)
 
@@ -300,24 +317,33 @@ func (s *Server) handleSubscribe(mc *mqttConn, payload []byte, spies map[string]
 		spies[cleanTopic] = spyChan
 		grantedQoS = append(grantedQoS, 0x00)
 
-		go func(ch chan message.Message) {
-			for msg := range ch {
-				topicBytes := []byte(msg.Topic)
-				var varHeader []byte
-				varHeader = append(varHeader, byte(len(topicBytes)>>8), byte(len(topicBytes)))
-				varHeader = append(varHeader, topicBytes...)
+		go func(ch chan message.Message, t string) {
+			defer s.broker.RemoveSpy(t, ch)
+			for {
+				select {
+				case msg, open := <-ch:
+					if !open {
+						return
+					}
+					topicBytes := []byte(msg.Topic)
+					var varHeader []byte
+					varHeader = append(varHeader, byte(len(topicBytes)>>8), byte(len(topicBytes)))
+					varHeader = append(varHeader, topicBytes...)
 
-				totalPayload := append(varHeader, msg.Payload...)
-				remLenBytes := writeRemainingLength(len(totalPayload))
+					totalPayload := append(varHeader, msg.Payload...)
+					remLenBytes := writeRemainingLength(len(totalPayload))
 
-				packet := append([]byte{PacketPublish << 4}, remLenBytes...)
-				packet = append(packet, totalPayload...)
+					packet := append([]byte{PacketPublish << 4}, remLenBytes...)
+					packet = append(packet, totalPayload...)
 
-				if err := mc.write(packet); err != nil {
+					if err := mc.write(packet); err != nil {
+						return
+					}
+				case <-s.quit:
 					return
 				}
 			}
-		}(spyChan)
+		}(spyChan, cleanTopic)
 	}
 
 	subAckHeader := []byte{PacketSubAck << 4}
@@ -342,8 +368,8 @@ func (s *Server) handleUnsubscribe(mc *mqttConn, payload []byte, spies map[strin
 		if err != nil {
 			break
 		}
-		cleanTopic := strings.ReplaceAll(topic, "#", "*")
-		cleanTopic = strings.ReplaceAll(cleanTopic, "+", "*")
+
+		cleanTopic := translateMQTTWildcard(topic)
 
 		if ch, exists := spies[cleanTopic]; exists {
 			s.broker.RemoveSpy(cleanTopic, ch)

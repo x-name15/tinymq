@@ -27,6 +27,6 @@ COPY --from=builder --chown=10001:10001 /home/tinymq/data ./data
 
 USER 10001
 
-EXPOSE 7800 1883
+EXPOSE 7800 1883 7901
 
 CMD ["./tinymq"]

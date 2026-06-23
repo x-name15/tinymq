@@ -105,7 +105,7 @@ If `limit=1` (Default), returns a single JSON object. If `limit > 1`, returns a 
 *(Binary payloads may be base64-encoded depending on your client.)*
 
 **Response (204):** When timeout expires and no message arrived. (No Content)
-*Note: Prior to v2.7.0, this returned a 404 Not Found.*
+*(Note: As per RFC 7230, a 204 response does not contain a JSON body).*
 
 ```json
 {
@@ -191,6 +191,18 @@ curl -X POST http://127.0.0.1:7800/api/topics \
   -d '{"name": "analytics.events"}'
 ```
 
+### Inspect Messages (Peek)
+**Endpoint:** `GET /api/queues/peek?queue={topic}&limit={count}`
+Safely inspects up to `limit` messages in RAM without consuming or deleting them.
+
+### Purge Queue
+**Endpoint:** `DELETE /api/queues/purge?queue={topic}`
+Empties a queue of all messages but keeps the queue and its metadata active.
+
+### Delete Queue
+**Endpoint:** `DELETE /api/queues/delete?queue={topic}`
+Completely destroys the queue, its consumers, and permanently deletes its underlying `.log` file.
+
 ### Dashboard
 
 Visit `http://127.0.0.1:7800/dashboard` to access the interactive web interface. Features include:
@@ -222,13 +234,14 @@ MQTT topic layers are fully compatible with TinyMQ's core wildcard architecture.
 **Option A — Download a pre-built binary (recommended)**
 
 Go to the [GitHub Releases page](https://github.com/x-name15/tinymq/releases) and download the binary for your platform:
+> **Keep in MInd:** tmq CLI is bundled with the Broker Server on releases page.
 
 | Platform       | File                      |
 |----------------|---------------------------|
-| Linux (amd64)  | `tmq-linux-amd64`         |
-| macOS (Intel)  | `tmq-darwin-amd64`        |
-| macOS (Apple Silicon) | `tmq-darwin-arm64` |
-| Windows        | `tmq-windows-amd64.exe`   |
+| Linux (amd64)  | `tinymq-windows-amd64.zip`         |
+| macOS (Intel)  | `tinymq-linux-amd64.tar.gz`        |
+| macOS (Apple Silicon) | `tinymq-darwin-amd64.tar.gz` |
+| Windows        | `tinymq-darwin-arm64.tar.gz`   |
 
 On Linux/macOS, make it executable after downloading:
 
@@ -266,7 +279,7 @@ tmq shell               # Opens an interactive REPL session (tinymq> prompt)
 # Queue operations
 tmq pub <topic> <data>  # Publishes a message (--ttl, --delay, --broadcast)
 tmq sub <topic>         # Consumes messages (--timeout, --limit, --auto-ack)
-tmq peek <topic>        # Inspects messages in RAM without consuming
+tmq peek <topic> [--limit=N]  # Inspects messages in RAM without consuming
 tmq tail <topic>        # Zero-latency live stream monitoring (SSE)
 
 # Administration
@@ -382,6 +395,57 @@ func main() {
     select {} // Block forever
 }
 ```
+## Appendix: High Availability & Ephemeral Clustering
+
+TinyMQ includes a custom-built, ultra-lightweight, zero-dependency P2P clustering engine designed for high availability and strict data consistency without external consensus tools (like Raft or ZooKeeper).
+
+### Architectural Design
+
+The clustering system works on two fundamental pillars:
+1. **Transparent Leader Proxying:** Followers run in a read-only state for data-modifying mutations. Any HTTP mutation (`/publish/`, `/consume/`, `/ack/`, etc.) hitting a Follower node is automatically intercepted by a high-performance Reverse Proxy and forwarded to the active Leader.
+2. **Quorum-Based Ephemeral Replication:** When the Leader accepts a publish action, it broadcasts the message to all known peers via short-lived TCP sockets using a specialized `REPLICATE` protocol. The operation is only acknowledged to the client (`202 Accepted`) if a strict majority (Quorum) of cluster nodes acknowledge the storage write.
+````
+                  [ Client HTTP Request ]
+                            │
+                            ▼
+                  ┌───────────────────┐
+                  │  Follower Node    │
+                  │  (REST Server)    │
+                  └─────────┬─────────┘
+                            │ (Transparent Proxy)
+                            ▼
+                  ┌───────────────────┐
+                  │    Leader Node    │
+                  │  (REST Server)    │
+                  └─────────┬─────────┘
+                            │
+           ┌────────────────┴────────────────┐
+           ▼ (TCP REPLICATE)                 ▼ (Local Storage)
+┌───────────────────┐               ┌───────────────────┐
+│   Follower Node   │               │   Leader WAL      │
+│   (TCP Socket)    │               │   (Disk Write)    │
+└───────────────────┘               └───────────────────┘
+````
+### Cluster Environment Variables
+
+To activate clustering, configure the following keys in your `.env` file or environment:
+
+* `TINYMQ_CLUSTER_ADDR`: The TCP binding address for intra-cluster communication (e.g., `127.0.0.1:7901`).
+* `TINYMQ_CLUSTER_NODES`: Comma-separated addresses of other cluster participants (e.g., `127.0.0.1:7902,127.0.0.1:7903`).
+* `TINYMQ_CLUSTER_SECRET`: **[SECURITY CRITICAL]** The HMAC-SHA256 secret key. **Warning:** If left empty, the cluster TCP port accepts connections from any peer without authentication, exposing your broker to arbitrary data injection!
+* `TINYMQ_CLUSTER_HTTP_ADVERTISE`: **[Routing]** The HTTP address advertised to followers for Reverse Proxy redirection (e.g., `192.168.1.10:7800`). Crucial for Docker NAT environments.
+* `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Custom timeout for Quorum acknowledgement (Default: `500ms`).
+* `TINYMQ_CLUSTER_LEADER`: Set to `true` to declare a static, designated Leader node and disable automated election timeouts.
+
+### Operational Verification
+
+To monitor cluster consensus health in real-time, inspect the application logging streams. Active peer discovery, reverse proxy redirection, and atomic synchronization states will output under the `[Cluster]` and `[Proxy]` log scopes:
+
+```bash
+[Cluster] Node 127.0.0.1:7902 is now ONLINE
+[Proxy] Forwarding POST request to Leader (127.0.0.1:7801)
+[Cluster] Message replicated to 2 nodes (Quorum OK)
+```
 
 ### System Limits & Security
 To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
@@ -390,11 +454,16 @@ To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks
 - **Topic & Group Validation:** To prevent Path Traversal injections, all topic and consumer group names are strictly validated against the `^[a-zA-Z0-9._:-]+$` regex. The underlying disk engine also actively blocks any paths containing `..`, `/`, or `\`.
 - **Max Active Topics:** Configurable via `TINYMQ_MAX_TOPICS` (Default: `10,000`). Prevents Denial of Service (DoS) attacks that attempt to exhaust server RAM by dynamically generating millions of unique topic names. If the limit is reached, topic creation requests are safely rejected.
 
+> **Note on 503 Service Unavailable:** If the cluster is experiencing a split-brain, leader election, or the Leader node is unreachable, write-operations (`POST`, `DELETE`) on follower nodes will safely reject the request with a `503` status code to prevent data divergence.
+
 ---
 
 ## Configuration & deployment
 
 TinyMQ requires no configuration files by default; it uses environment variables and Docker volumes.
+
+### Using the pre-built Docker image
+> **Architecture note:** The pre-built images published to GHCR and Docker Hub are `linux/amd64` only. ARM hosts (Raspberry Pi, Apple Silicon running Linux VMs, AWS Graviton, etc.) must build from source.
 
 ### Using the pre-built Docker image (GHCR)
 
@@ -404,42 +473,77 @@ docker pull ghcr.io/x-name15/tinymq:latest
 docker run -d \
   --name tinymq \
   -p 7800:7800 \
-  -v $(pwd)/data:/root/data \
+  -p 1883:1883 \
+  -p 7901:7901 \
+  --env-file .env \
+  -v $(pwd)/data:/home/tinymq/data \
   ghcr.io/x-name15/tinymq:latest
 ```
 
+#### From Docker Hub
+
+```bash
+docker pull flez71/tinymq:latest
+
+docker run -d \
+  --name tinymq \
+  -p 7800:7800 \
+  -p 1883:1883 \
+  -p 7901:7901 \
+  --env-file .env \
+  -v $(pwd)/data:/home/tinymq/data \
+  flez71/tinymq:latest
+```
+> If you are running a **cluster node**, add `-p 7901:7901` (or whichever port you set in `TINYMQ_CLUSTER_ADDR`) to expose the intra-cluster TCP channel.
 ### Environment variables
 
 - `PORT`: HTTP listening port (default `7800`).
 - `TINYMQ_FSYNC`: Set to `true` to force physical disk flushes (Bank-grade durability).
 - `TINYMQ_COMPACT_INTERVAL`: Background WAL garbage collector interval (default `10m`).
 - `TINYMQ_DEFAULT_POLICY`: Defines memory behavior when a queue hits its limit. Set to `reject` (returns HTTP 429) or `drop-oldest` (acts as a Ring Buffer).
-- `TINYMQ_MAX_MESSAGES`: Maximum number of messages held in `RAM` per topic (default `100000`).
-- `TINYMQ_API_KEY`: Secures the broker. If set, all endpoints (including the Dashboard) will require an `Authorization: Bearer  HTTP header`.
+- `TINYMQ_MAX_MESSAGES`: Maximum number of messages held in RAM per topic (default `100000`).
+- `TINYMQ_API_KEY`: Secures the broker. If set, all endpoints (including the Dashboard) will require an `Authorization: Bearer <token>` HTTP header.
 - `TINYMQ_MAX_TOPICS`: Limits the maximum number of unique topics/queues allowed in memory (default `10000`) to protect against DoS attacks.
-- `TINYMQ_MQTT_PORT`: TCP port for the MQTT gateway (default `1883`). **Leave this completely empty to disable the MQTT server** and save resources if you only need HTTP/WS.
+
+### MQTT settings
+
+- `TINYMQ_MQTT_PORT`: TCP port for the MQTT gateway (default `1883`).
+- `TINYMQ_MQTT_DISABLE`: Set to `true` on secondary cluster nodes to shut down the MQTT server and free network file descriptors.
+
+### Clustering settings
+
+> ⚠️ **Security:** Without `TINYMQ_CLUSTER_SECRET`, the intra-cluster TCP channel accepts connections from **any peer without authentication**. Always set this variable when the cluster port is reachable from outside a trusted private network.
+
+- `TINYMQ_CLUSTER_ADDR`: The TCP address where this node listens for cluster connections (e.g., `127.0.0.1:7901`).
+- `TINYMQ_CLUSTER_NODES`: Comma-separated addresses of other cluster participants (e.g., `127.0.0.1:7902,127.0.0.1:7903`).
+- `TINYMQ_CLUSTER_LEADER`: Set to `true` to declare a static Leader node and disable automatic election timeouts.
+- `TINYMQ_CLUSTER_SECRET`: Shared secret used to sign and verify all intra-cluster TCP messages via HMAC-SHA256. If unset, communication is unauthenticated and peers are accepted without verification.
+- `TINYMQ_CLUSTER_HTTP_ADVERTISE`: The HTTP address this node advertises to followers for reverse proxying (e.g., `192.168.1.10:7800`). Required when the node's bind address is not reachable by peers directly (Docker bridge networks, NAT, etc.).
+- `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Timeout for each peer acknowledgment during quorum replication (default `500ms`). Accepts Go duration strings (e.g., `1s`, `200ms`).
 
 ### Persistent data (Docker Compose)
 
-TinyMQ writes WAL `.log` files into `/home/tinymq/data` inside the container. To ensure data persistence across container restarts, mount a local directory to this path:
+TinyMQ writes WAL `.log` files into `/home/tinymq/data` inside the container. Mount a local directory to persist data across restarts:
 
 ```yaml
 services:
   tinymq:
-    build: .
-    image: tinymq:latest
+    image: ghcr.io/x-name15/tinymq:latest   # use pre-built image; replace with build: . to build from source
+    container_name: tinymq
     env_file:
       - .env
     ports:
       - "${PORT:-7800}:7800"
       - "${TINYMQ_MQTT_PORT:-1883}:${TINYMQ_MQTT_PORT:-1883}"
+      # Uncomment the line below if running as a cluster node:
+      # - "${TINYMQ_CLUSTER_ADDR_PORT:-7901}:7901"
     volumes:
-      # Mount your local ./data directory to the container's internal data path
       - ./data:/home/tinymq/data
     restart: unless-stopped
     user: "10001:10001"
 ```
-> **Permissions Note:** TinyMQ runs as a secure, unprivileged user (`UID 10001`). If you are bind-mounting a local directory like `./data`, ensure the container has write permissions to it before starting:
+
+> **Permissions note:** TinyMQ runs as an unprivileged user (`UID 10001`). Before starting, ensure the mounted directory is writable:
 > ```bash
 > mkdir -p ./data && sudo chown -R 10001:10001 ./data
 > ```

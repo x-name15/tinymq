@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"runtime"
@@ -20,38 +21,50 @@ import (
 	"time"
 
 	"github.com/x-name15/tinymq/internal/broker"
+	"github.com/x-name15/tinymq/internal/cluster"
 	"github.com/x-name15/tinymq/internal/message"
 	"github.com/x-name15/tinymq/internal/transport/ws"
 )
+
+// ProxyTransport
+var proxyTransport = &http.Transport{
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
 
 //go:embed dashboard.html
 var dashboardFS embed.FS
 var compiledDashboardTemplate = template.Must(template.ParseFS(dashboardFS, "dashboard.html"))
 
 type Server struct {
-	broker     *broker.Broker
-	httpServer *http.Server
-	version    string
-	startTime  time.Time
+	broker      *broker.Broker
+	httpServer  *http.Server
+	version     string
+	startTime   time.Time
+	clusterNode *cluster.Node
 }
 
-func NewServer(b *broker.Broker, port string, version string) *Server {
+func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *Server {
 	s := &Server{
-		broker:    b,
-		version:   version,
-		startTime: time.Now(),
+		broker:      b,
+		version:     version,
+		startTime:   time.Now(),
+		clusterNode: c,
 	}
 
 	mux := http.NewServeMux()
 
 	// Core API
-	mux.HandleFunc("/publish/", s.withAuth(s.handlePublish))
-	mux.HandleFunc("/consume/", s.withAuth(s.handleConsume))
-	mux.HandleFunc("/ack/", s.withAuth(s.handleAck))
-	mux.HandleFunc("/requeue", s.withAuth(s.handleRequeue))
-	mux.HandleFunc("/webhook/", s.withAuth(s.handleRegisterWebhook))
-	mux.HandleFunc("/api/topics", s.withAuth(s.handleCreateTopic))
-	mux.HandleFunc("/stream/", s.withAuth(s.handleStream))
+	mux.HandleFunc("/publish/", s.leaderProxy(s.withAuth(s.handlePublish)))
+	mux.HandleFunc("/consume/", s.leaderProxy(s.withAuth(s.handleConsume)))
+	mux.HandleFunc("/ack/", s.leaderProxy(s.withAuth(s.handleAck)))
+	mux.HandleFunc("/requeue", s.leaderProxy(s.withAuth(s.handleRequeue)))
+	mux.HandleFunc("/webhook/", s.leaderProxy(s.withAuth(s.handleRegisterWebhook)))
+	mux.HandleFunc("/api/topics", s.leaderProxy(s.withAuth(s.handleCreateTopic)))
+	mux.HandleFunc("/stream/", s.leaderProxy(s.withAuth(s.handleStream)))
 
 	// UI & Telemetry
 	mux.HandleFunc("/dashboard", s.withAuth(s.handleDashboard))
@@ -71,16 +84,18 @@ func NewServer(b *broker.Broker, port string, version string) *Server {
 		case http.MethodGet:
 			s.handleListQueues(w, r)
 		case http.MethodPost:
-			s.handleCreateTopic(w, r)
+			s.leaderProxy(s.handleCreateTopic)(w, r)
+			return
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}))
-	mux.HandleFunc("/api/queues/publish", s.withAuth(s.handleQueuePublish))
-	mux.HandleFunc("/api/queues/consume", s.withAuth(s.handleQueueConsume))
+
+	mux.HandleFunc("/api/queues/publish", s.leaderProxy(s.withAuth(s.handleQueuePublish)))
+	mux.HandleFunc("/api/queues/consume", s.leaderProxy(s.withAuth(s.handleQueueConsume)))
 	mux.HandleFunc("/api/queues/peek", s.withAuth(s.handleQueuePeek))
-	mux.HandleFunc("/api/queues/purge", s.withAuth(s.handleQueuePurge))
-	mux.HandleFunc("/api/queues/delete", s.withAuth(s.handleQueueDelete))
+	mux.HandleFunc("/api/queues/purge", s.leaderProxy(s.withAuth(s.handleQueuePurge)))
+	mux.HandleFunc("/api/queues/delete", s.leaderProxy(s.withAuth(s.handleQueueDelete)))
 	mux.HandleFunc("/api/queues/webhooks", s.withAuth(s.handleGetWebhooks))
 
 	s.httpServer = &http.Server{
@@ -90,9 +105,52 @@ func NewServer(b *broker.Broker, port string, version string) *Server {
 
 	// WebSockets (Protocol TMP-WS)
 	wsServer := ws.NewServer(b)
-	mux.HandleFunc("/ws", s.withAuth(wsServer.HandleWS))
+	mux.HandleFunc("/ws", s.leaderProxy(s.withAuth(wsServer.HandleWS)))
 
 	return s
+}
+
+// --- MIDDLEWARE REVERSE PROXY OPTIMIZADO PARA WEBSOCKETS ---
+func (s *Server) leaderProxy(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.clusterNode != nil && !s.clusterNode.IsLeader() {
+			leaderAddr := s.clusterNode.GetLeaderHTTP()
+			if leaderAddr != "" {
+				log.Printf("[Proxy] Forwarding %s request to Leader (%s) [Conn: %s]\n", r.Method, leaderAddr, r.Header.Get("Upgrade"))
+
+				target, _ := url.Parse("http://" + leaderAddr)
+				proxy := httputil.NewSingleHostReverseProxy(target)
+				proxy.Transport = proxyTransport
+
+				proxy.FlushInterval = 50 * time.Millisecond
+
+				proxy.Director = func(req *http.Request) {
+					req.URL.Scheme = target.Scheme
+					req.URL.Host = target.Host
+					req.URL.Path = r.URL.Path
+					req.URL.RawQuery = r.URL.RawQuery
+
+					if strings.ToLower(r.Header.Get("Upgrade")) == "websocket" {
+						req.Header.Set("Upgrade", "websocket")
+						req.Header.Set("Connection", "Upgrade")
+					}
+
+					if auth := r.Header.Get("Authorization"); auth != "" {
+						req.Header.Set("Authorization", auth)
+					}
+
+					req.Header.Set("X-Forwarded-For", r.RemoteAddr)
+					req.Header.Set("X-Real-IP", r.RemoteAddr)
+				}
+
+				proxy.ServeHTTP(w, r)
+				return
+			}
+			http.Error(w, "Cluster is electing a new leader, please retry", http.StatusServiceUnavailable)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) Start() error {
