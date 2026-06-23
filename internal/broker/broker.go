@@ -41,6 +41,7 @@ type Broker struct {
 	idempotencyKeys map[string]time.Time
 	bindings        map[string]map[string]bool
 	OnPublish       func(topic string, payload []byte) error
+	OnGroupCreate   func(topic, group string) error
 }
 
 type TopicStat struct {
@@ -156,14 +157,20 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 }
 
 func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool) error {
-	return b.publishCore(topicName, payload, expiresAt, deliverAt, isBroadcast, false)
+	return b.publishCore(topicName, payload, expiresAt, deliverAt, isBroadcast, false, 0) // <-- Añadimos el 0 inicial
 }
 
 func (b *Broker) PublishReplicated(topicName string, payload []byte) error {
-	return b.publishCore(topicName, payload, nil, nil, false, true)
+	return b.publishCore(topicName, payload, nil, nil, false, true, 0)
 }
 
-func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool, isReplication bool) error {
+func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool, isReplication bool, depth int) error {
+	
+	if depth > 10 {
+		log.Printf("[Broker] SEC-ALERT: Binding loop or max depth detected resolving topic '%s'", topicName)
+		return errors.New("binding loop detected")
+	}
+
 	if !validTopicRegex.MatchString(topicName) {
 		log.Printf("Rejected publish to invalid topic name: %s\n", topicName)
 		return errors.New("invalid topic name")
@@ -180,7 +187,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.T
 		b.mu.RUnlock()
 
 		for _, dest := range boundTopics {
-			b.publishCore(dest, payload, expiresAt, deliverAt, isBroadcast, isReplication)
+			b.publishCore(dest, payload, expiresAt, deliverAt, isBroadcast, isReplication, depth+1)
 		}
 	}
 
@@ -792,10 +799,9 @@ func (b *Broker) AddSpy(topicName string) (chan message.Message, error) {
 }
 
 func (b *Broker) RemoveSpy(topicName string, ch chan message.Message) {
-	b.mu.Lock()
+	b.mu.RLock() 
 	t, exists := b.Topics[topicName]
-	b.mu.Unlock()
-
+	b.mu.RUnlock()
 	if !exists {
 		return
 	}
@@ -842,20 +848,26 @@ func (b *Broker) CreateGroup(topicName, groupName string) (string, error) {
 		}
 	}
 
+	if b.OnGroupCreate != nil {
+		b.OnGroupCreate(topicName, groupName)
+	}
+
 	return virtualName, nil
 }
 
-func (b *Broker) GetStateSnapshot() map[string][][]byte {
+func (b *Broker) GetStateSnapshot() []message.Message {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	snapshot := make(map[string][][]byte)
-	for name, topic := range b.Topics {
-		topic.mu.Lock()
-		for _, msg := range topic.Messages {
-			snapshot[name] = append(snapshot[name], msg.Payload)
-		}
-		topic.mu.Unlock()
+	topics := make([]*Topic, 0, len(b.Topics))
+	for _, t := range b.Topics {
+		topics = append(topics, t)
 	}
-	return snapshot
+	b.mu.RUnlock()
+
+	var allMessages []message.Message
+	for _, t := range topics {
+		t.mu.Lock()
+		allMessages = append(allMessages, t.Messages...)
+		t.mu.Unlock()
+	}
+	return allMessages
 }

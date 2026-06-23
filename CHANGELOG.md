@@ -3,7 +3,7 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
-## [2.8.0] - 2026-06-23 - Home Made - Clustering 
+## [2.8.0] - 2026-06-23 - HomeMade Clustering and More Fixes 
 
 ### Added
 - **High Availability Clustering (P2P):** Native, zero-dependency clustering engine for Leader/Follower topologies.
@@ -26,6 +26,18 @@ All notable changes of the proyect will be documented on this file.
 - Fixed an accessibility issue in Docker environments by explicitly mapping the Leader's advertised HTTP address for inter-node proxying via the `TINYMQ_CLUSTER_HTTP_ADVERTISE` logic.
 - Corrected the Quorum mathematical calculation to strictly evaluate against the configured cluster size, preventing infinite split-votes or unreachable consensus when dynamically discovering peers.
 - **Critical Persistence Ordering:** Refactored `Broker.publishCore` to persist payloads to the local disk (Write-Ahead Log) *before* triggering network replication, preventing permanent data divergence between the Leader and Followers in the event of an untimely crash.
+- **DoS Protection:** Hardened peer discovery by silently rejecting unconfigured nodes, preventing memory exhaustion and Quorum inflation attacks.
+- **Auditability:** Reverse proxy now correctly injects `X-Forwarded-For` and `X-Real-IP` headers, preserving the original client IP for security logging on the Leader.
+- **Global Lock Starvation:** Eliminated global `RLock()` contention in `GetStateSnapshot()` by executing shallow pointer copies, preventing the broker from freezing during massive cluster synchronizations.
+- **Goroutine Leak Protection:** Stabilized the background gossip routines via bounded semaphore channels, capping the concurrent network execution pool to a controlled maximum.
+- **Stack Overflow Mitigation:** Implemented a maximum depth limiter (depth=10) inside `publishCore` recursion to prevent catastrophic broker crashes caused by circular Consumer Group bindings.
+- **WebSocket Disconnect Contention:** Downgraded the global `Mutex.Lock()` to `Mutex.RLock()` in `RemoveSpy`, significantly reducing lock starvation during mass WebSocket client disconnections.
+- **MQTT Edge-Case Crash:** Hardened the MQTT `CONNECT` packet parser with strict bounds checks, neutralizing denial-of-service crashes triggered by truncated 2-byte payloads.
+- **MQTT Wildcard Isolation:** Corrected structural single-level (`+`) and multi-level (`#`) MQTT wildcard translation logic to preserve topic hierarchy separation.
+- **MQTT Goroutine Leak Protection:** Implemented socket lifecycle monitors within subscriber dispatcher loops, guaranteeing immediate thread reclamation upon client abrupt disconnection.
+- **Hot-Path Optimization:** Memoized the `TINYMQ_CLUSTER_NODES` environment variable parsing during Quorum calculation, eliminating expensive OS-level syscalls on every publish action.
+- **Proxy Connection Pooling:** Injected a globally cached `http.Transport` into the Reverse Proxy middleware, allowing Followers to reuse persistent TCP sockets when routing HTTP requests to the Leader (massive throughput boost).
+
 
 ---
 ## [2.7.5] - 2026-06-22 — The Ecosystem Update

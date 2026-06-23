@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"strings"
@@ -47,6 +48,9 @@ type Node struct {
 	lastHeartbeatSeen time.Time
 	broker            *broker.Broker
 	clusterSecret     string
+	isSynced          bool
+	wg                sync.WaitGroup
+	quorumSize        int
 }
 
 func NewNode(bindAddr string, httpPort string, b *broker.Broker) *Node {
@@ -80,6 +84,11 @@ func NewNode(bindAddr string, httpPort string, b *broker.Broker) *Node {
 	b.OnPublish = func(topic string, payload []byte) error {
 		return n.Replicate(topic, payload)
 	}
+
+	b.OnGroupCreate = func(topic string, group string) error {
+		return n.ReplicateBinding(topic, group)
+	}
+
 	return n
 }
 
@@ -122,9 +131,11 @@ func (n *Node) Start() error {
 	n.listener = l
 	log.Printf("[Cluster] Node listening for peers on %s\n", n.Address)
 
-	go n.acceptConnections()
-	go n.gossipLoop()
-	go n.electionTimeoutLoop()
+	n.wg.Add(3)
+	go func() { defer n.wg.Done(); n.acceptConnections() }()
+	go func() { defer n.wg.Done(); n.gossipLoop() }()
+	go func() { defer n.wg.Done(); n.electionTimeoutLoop() }()
+
 	return nil
 }
 
@@ -244,19 +255,13 @@ func (n *Node) handlePeer(conn net.Conn) {
 			if isLeader {
 				log.Printf("[Cluster] Sending state snapshot to amnesic node: %s\n", targetAddr)
 
-				snapshot := n.broker.GetStateSnapshot()
-
-				for topic, messages := range snapshot {
-					for _, msgData := range messages {
-						payloadB64 := base64.StdEncoding.EncodeToString(msgData)
-						body := fmt.Sprintf("REPLICATE %d %s %s", term, topic, payloadB64)
-						mac := n.signMessage(body)
-						syncMsg := fmt.Sprintf("%s %s\n", body, mac)
-
-						conn.Write([]byte(syncMsg))
-						reader.ReadString('\n')
-					}
+				messages := n.broker.GetStateSnapshot()
+				for _, msg := range messages {
+					payloadB64 := base64.StdEncoding.EncodeToString(msg.Payload)
+					body := fmt.Sprintf("REPLICATE %d %s %s", term, msg.Topic, payloadB64)
+					conn.Write([]byte(body + "\n"))
 				}
+				conn.Write([]byte("SYNC_COMPLETE\n"))
 			}
 
 		case "REQUEST_VOTE":
@@ -273,17 +278,75 @@ func (n *Node) handlePeer(conn net.Conn) {
 			} else {
 				fmt.Fprintf(conn, "VOTE_DENIED %d\n", n.CurrentTerm)
 			}
+
+		case "BIND_GROUP":
+			if len(parts) < 4 {
+				continue
+			}
+			term := 0
+			fmt.Sscanf(parts[1], "%d", &term)
+			topic := parts[2]
+			group := parts[3]
+
+			n.mu.RLock()
+			currentTerm := n.CurrentTerm
+			n.mu.RUnlock()
+
+			if term >= currentTerm {
+				_, err := n.broker.CreateGroup(topic, group)
+				if err == nil {
+					log.Printf("[Cluster] Replicated Consumer Group binding: %s -> %s\n", topic, group)
+				}
+			}
 		}
 	}
 }
 
 func (n *Node) calculateQuorum() int {
+	if n.quorumSize > 0 {
+		return n.quorumSize
+	}
+
 	nodesEnv := os.Getenv("TINYMQ_CLUSTER_NODES")
 	if nodesEnv == "" {
+		n.quorumSize = 1
 		return 1
 	}
 	totalClusterSize := len(strings.Split(nodesEnv, ",")) + 1
-	return (totalClusterSize / 2) + 1
+	n.quorumSize = (totalClusterSize / 2) + 1
+	return n.quorumSize
+}
+
+func (n *Node) ReplicateBinding(topic string, group string) error {
+	n.mu.RLock()
+	role := n.Role
+	term := n.CurrentTerm
+	var peers []string
+	for addr, peer := range n.Peers {
+		if peer.IsAlive {
+			peers = append(peers, addr)
+		}
+	}
+	n.mu.RUnlock()
+
+	if role != Leader || len(peers) == 0 {
+		return nil
+	}
+
+	body := fmt.Sprintf("BIND_GROUP %d %s %s", term, topic, group)
+	mac := n.signMessage(body)
+	msg := fmt.Sprintf("%s %s\n", body, mac)
+
+	for _, addr := range peers {
+		go func(target string) {
+			conn, err := net.DialTimeout("tcp", target, 5*time.Second)
+			if err == nil {
+				defer conn.Close()
+				fmt.Fprint(conn, msg)
+			}
+		}(addr)
+	}
+	return nil
 }
 
 func (n *Node) Replicate(topic string, payload []byte) error {
@@ -306,20 +369,26 @@ func (n *Node) Replicate(topic string, payload []byte) error {
 		return nil
 	}
 
+	timeoutDuration := 500 * time.Millisecond
+	if tStr := os.Getenv("TINYMQ_CLUSTER_REPLICATE_TIMEOUT"); tStr != "" {
+		if d, err := time.ParseDuration(tStr); err == nil {
+			timeoutDuration = d
+		}
+	}
+
 	payloadB64 := base64.StdEncoding.EncodeToString(payload)
 	body := fmt.Sprintf("REPLICATE %d %s %s", term, topic, payloadB64)
 	mac := n.signMessage(body)
 	msg := fmt.Sprintf("%s %s\n", body, mac)
 
 	successCount := 1
-	var wg sync.WaitGroup
 	var mu sync.Mutex
 
+	ackChan := make(chan struct{}, len(peers))
+
 	for _, addr := range peers {
-		wg.Add(1)
 		go func(target string) {
-			defer wg.Done()
-			conn, err := net.DialTimeout("tcp", target, 5*time.Second)
+			conn, err := net.DialTimeout("tcp", target, timeoutDuration)
 			if err != nil {
 				return
 			}
@@ -327,51 +396,82 @@ func (n *Node) Replicate(topic string, payload []byte) error {
 
 			fmt.Fprint(conn, msg)
 			reader := bufio.NewReader(conn)
-			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			conn.SetReadDeadline(time.Now().Add(timeoutDuration))
 			resp, _ := reader.ReadString('\n')
+
 			if strings.TrimSpace(resp) == "REPLICATE_ACK" {
 				mu.Lock()
 				successCount++
 				mu.Unlock()
+				ackChan <- struct{}{}
 			}
 		}(addr)
 	}
 
-	wg.Wait()
 	quorum := n.calculateQuorum()
-	if successCount >= quorum {
-		log.Printf("[Cluster] Message replicated to %d nodes (Quorum OK)\n", successCount)
-		return nil
+	timeoutTimer := time.NewTimer(timeoutDuration)
+	defer timeoutTimer.Stop()
+
+	for successCount < quorum {
+		select {
+		case <-ackChan:
+		case <-timeoutTimer.C:
+			return fmt.Errorf("replication quorum timeout: %d/%d ACKs received within %v", successCount, len(n.Peers)+1, timeoutDuration)
+		}
 	}
-	return fmt.Errorf("replication quorum failed: %d/%d ACKs received", successCount, len(n.Peers)+1)
+
+	log.Printf("[Cluster] Message replicated to %d nodes (Quorum OK)\n", successCount)
+	return nil
 }
 
 func (n *Node) gossipLoop() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	leaderTicker := time.NewTicker(1 * time.Second)
+	followerTicker := time.NewTicker(5 * time.Second)
+	defer leaderTicker.Stop()
+	defer followerTicker.Stop()
+
+	gossipSem := make(chan struct{}, 10)
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-leaderTicker.C:
 			n.mu.RLock()
-			role := n.Role
-			var peersToPing []string
-			for addr := range n.Peers {
-				peersToPing = append(peersToPing, addr)
+			if n.Role == Leader {
+				n.dispatchGossip(gossipSem, true)
 			}
 			n.mu.RUnlock()
 
-			if role == Leader {
-				for _, addr := range peersToPing {
-					go n.sendHeartbeat(addr)
-				}
-			} else {
-				for _, addr := range peersToPing {
-					go n.pingPeer(addr)
-				}
+		case <-followerTicker.C:
+			n.mu.RLock()
+			if n.Role != Leader {
+				n.dispatchGossip(gossipSem, false)
 			}
+			n.mu.RUnlock()
+
 		case <-n.quit:
 			return
+		}
+	}
+}
+
+func (n *Node) dispatchGossip(sem chan struct{}, isLeader bool) {
+	var peersToPing []string
+	for addr := range n.Peers {
+		peersToPing = append(peersToPing, addr)
+	}
+
+	for _, addr := range peersToPing {
+		select {
+		case sem <- struct{}{}:
+			go func(target string) {
+				defer func() { <-sem }()
+				if isLeader {
+					n.sendHeartbeat(target)
+				} else {
+					n.pingPeer(target)
+				}
+			}(addr)
+		default:
 		}
 	}
 }
@@ -440,6 +540,9 @@ func (n *Node) handleHeartbeat(term int, leader string, leaderHttp string) {
 	n.mu.Lock()
 
 	isNewLeader := n.VotedFor != leader
+	if isNewLeader {
+		n.isSynced = false
+	}
 
 	if term >= n.CurrentTerm {
 		n.lastHeartbeatSeen = time.Now()
@@ -451,16 +554,23 @@ func (n *Node) handleHeartbeat(term int, leader string, leaderHttp string) {
 		n.VotedFor = leader
 		n.LeaderHttp = leaderHttp
 	}
+	needsSync := !n.isSynced && n.Role == Follower
 	n.mu.Unlock()
 
-	if isNewLeader && n.Role == Follower {
+	if needsSync {
+		n.mu.Lock()
+		n.isSynced = true
+		n.mu.Unlock()
 		go n.requestSync(leader)
 	}
 }
 
 func (n *Node) requestSync(leaderAddr string) {
-	conn, err := net.DialTimeout("tcp", leaderAddr, 2*time.Second)
+	conn, err := net.DialTimeout("tcp", leaderAddr, 5*time.Second)
 	if err != nil {
+		n.mu.Lock()
+		n.isSynced = false
+		n.mu.Unlock()
 		return
 	}
 	defer conn.Close()
@@ -469,6 +579,29 @@ func (n *Node) requestSync(leaderAddr string) {
 	body := fmt.Sprintf("SYNC_REQ %s", n.Address)
 	mac := n.signMessage(body)
 	fmt.Fprintf(conn, "%s %s\n", body, mac)
+
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	reader := bufio.NewReader(conn)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimSpace(line)
+		if line == "SYNC_COMPLETE" {
+			log.Println("[Cluster] State synchronization complete.")
+			return
+		}
+
+		parts := strings.Split(line, " ")
+		if len(parts) >= 4 && parts[0] == "REPLICATE" {
+			topic := parts[2]
+			payloadB64 := parts[3]
+			if payload, err := base64.StdEncoding.DecodeString(payloadB64); err == nil {
+				n.broker.PublishReplicated(topic, payload)
+			}
+		}
+	}
 }
 
 func (n *Node) IsLeader() bool {
@@ -515,15 +648,15 @@ func (n *Node) evaluateVote(term int, candidate string) bool {
 }
 
 func (n *Node) electionTimeoutLoop() {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
+		timeout := time.Duration(3000+rand.Intn(3000)) * time.Millisecond
+		timer := time.NewTimer(timeout)
+
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			n.mu.RLock()
 			role := n.Role
-			timeoutExpired := time.Since(n.lastHeartbeatSeen) > 3*time.Second
+			timeoutExpired := time.Since(n.lastHeartbeatSeen) > timeout
 			n.mu.RUnlock()
 
 			isDesignatedLeader := os.Getenv("TINYMQ_CLUSTER_LEADER") == "true"
@@ -532,6 +665,7 @@ func (n *Node) electionTimeoutLoop() {
 				n.startElection()
 			}
 		case <-n.quit:
+			timer.Stop()
 			return
 		}
 	}
@@ -598,8 +732,7 @@ func (n *Node) markPeerAlive(addr string) {
 		peer.IsAlive = true
 		peer.LastSeen = time.Now()
 	} else {
-		log.Printf("[Cluster] Discovered new node %s\n", addr)
-		n.Peers[addr] = &Peer{Address: addr, IsAlive: true, LastSeen: time.Now()}
+		log.Printf("[Cluster] Rejecting unauthorized peer discovery attempt from: %s\n", addr)
 	}
 }
 
@@ -619,4 +752,7 @@ func (n *Node) Stop() {
 	if n.listener != nil {
 		n.listener.Close()
 	}
+
+	n.wg.Wait()
+	log.Println("[Cluster] Node gracefully shut down.")
 }

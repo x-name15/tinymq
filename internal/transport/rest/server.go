@@ -26,6 +26,15 @@ import (
 	"github.com/x-name15/tinymq/internal/transport/ws"
 )
 
+//ProxyTransport
+var proxyTransport = &http.Transport{
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
+
 //go:embed dashboard.html
 var dashboardFS embed.FS
 var compiledDashboardTemplate = template.Must(template.ParseFS(dashboardFS, "dashboard.html"))
@@ -111,6 +120,7 @@ func (s *Server) leaderProxy(next http.HandlerFunc) http.HandlerFunc {
 
 				target, _ := url.Parse("http://" + leaderAddr)
 				proxy := httputil.NewSingleHostReverseProxy(target)
+				proxy.Transport = proxyTransport
 
 				proxy.FlushInterval = 50 * time.Millisecond
 
@@ -128,6 +138,9 @@ func (s *Server) leaderProxy(next http.HandlerFunc) http.HandlerFunc {
 					if auth := r.Header.Get("Authorization"); auth != "" {
 						req.Header.Set("Authorization", auth)
 					}
+
+					req.Header.Set("X-Forwarded-For", r.RemoteAddr)
+					req.Header.Set("X-Real-IP", r.RemoteAddr)
 				}
 
 				proxy.ServeHTTP(w, r)

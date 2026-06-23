@@ -128,49 +128,6 @@ Access the dashboard at: **http://localhost:7800/dashboard**
 
 ---
 
-## High Availability Clustering (v2.7.5+)
-
-TinyMQ includes a built-in, zero-dependency P2P clustering engine. No ZooKeeper, no etcd, no external tools — just environment variables.
-
-### How it works
-
-- **Automatic Leader Election:** Nodes run a Raft-inspired gossip + vote protocol over a dedicated TCP port. If the Leader goes offline, remaining nodes elect a new one automatically.
-- **Quorum-Based Replication:** Every `publish` is replicated to all peers before being acknowledged to the client. The operation only succeeds if a strict majority (quorum) confirms the write.
-- **Transparent Follower Proxying:** Any write request (`/publish`, `/consume`, `/ack`, etc.) hitting a Follower is silently proxied to the active Leader. Clients need no cluster awareness.
-
-### Quick cluster setup (3 nodes)
-
-```bash
-# Node 1 — designated static leader
-TINYMQ_CLUSTER_ADDR=0.0.0.0:7901
-TINYMQ_CLUSTER_NODES=node2:7902,node3:7903
-TINYMQ_CLUSTER_LEADER=true
-PORT=7800
-
-# Node 2 — follower
-TINYMQ_CLUSTER_ADDR=0.0.0.0:7902
-TINYMQ_CLUSTER_NODES=node1:7901,node3:7903
-PORT=7800
-
-# Node 3 — follower
-TINYMQ_CLUSTER_ADDR=0.0.0.0:7903
-TINYMQ_CLUSTER_NODES=node1:7901,node2:7902
-PORT=7800
-```
-
-> **Network Note:** Intra-cluster communication uses plain TCP. Ensure all cluster nodes communicate over a private/trusted network (VPC, VLAN, or VPN). Never expose the cluster port (`TINYMQ_CLUSTER_ADDR`) to the public internet.
-
-### Cluster environment variables
-
-| Variable | Description |
-|----------|-------------|
-| `TINYMQ_CLUSTER_ADDR` | TCP bind address for intra-cluster communication (e.g. `0.0.0.0:7901`). Leave empty to run in standalone mode. |
-| `TINYMQ_CLUSTER_NODES` | Comma-separated addresses of other cluster nodes (e.g. `node2:7902,node3:7903`). |
-| `TINYMQ_CLUSTER_LEADER` | Set to `true` to designate this node as the static Leader and disable automatic elections. |
-| `TINYMQ_MQTT_DISABLE` | Set to `true` on follower/worker nodes to free TCP resources by disabling the MQTT server. |
-
----
-
 ## LICENSE
 
 TinyMQ is licensed under the GPL v3. See [`LICENSE`](./LICENSE) for details.
