@@ -3,7 +3,7 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
-## [2.8.0] - 2026-06-23 - HomeMade Clustering and More Fixes 
+## [2.8.0] - 2026-06-22 — Homemade Clustering Feature and More Stability and Security Fixes
 
 ### Added
 - **High Availability Clustering (P2P):** Native, zero-dependency clustering engine for Leader/Follower topologies.
