@@ -76,7 +76,7 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 			s.handleListQueues(w, r)
 		case http.MethodPost:
 			s.leaderProxy(s.handleCreateTopic)(w, r)
-			return 
+			return
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}

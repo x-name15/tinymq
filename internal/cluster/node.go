@@ -46,12 +46,12 @@ type Node struct {
 	quit              chan struct{}
 	lastHeartbeatSeen time.Time
 	broker            *broker.Broker
-	clusterSecret     string // <-- [SEC-CLUSTER-01]: Almacenamiento del secreto criptográfico
+	clusterSecret     string
 }
 
 func NewNode(bindAddr string, httpPort string, b *broker.Broker) *Node {
 	isDesignatedLeader := os.Getenv("TINYMQ_CLUSTER_LEADER") == "true"
-	secret := os.Getenv("TINYMQ_CLUSTER_SECRET") // <-- [SEC-CLUSTER-01]: Recuperación de la clave del entorno
+	secret := os.Getenv("TINYMQ_CLUSTER_SECRET")
 
 	if secret == "" {
 		log.Println("[Cluster] WARNING: TINYMQ_CLUSTER_SECRET is not set. TCP communication is unauthenticated!")
@@ -97,7 +97,6 @@ func (n *Node) loadPeersFromEnv() {
 	}
 }
 
-// --- [SEC-CLUSTER-01]: Utilidades de Firma Criptográfica HMAC-SHA256 ---
 func (n *Node) signMessage(message string) string {
 	if n.clusterSecret == "" {
 		return "NO_MAC"
@@ -109,12 +108,11 @@ func (n *Node) signMessage(message string) string {
 
 func (n *Node) verifyMessage(message, receivedMac string) bool {
 	if n.clusterSecret == "" {
-		return true // Bypass si no hay secreto configurado (entornos locales de dev)
+		return true
 	}
 	expected := n.signMessage(message)
 	return hmac.Equal([]byte(expected), []byte(receivedMac))
 }
-// -----------------------------------------------------------------------
 
 func (n *Node) Start() error {
 	l, err := net.Listen("tcp", n.Address)
@@ -147,8 +145,7 @@ func (n *Node) acceptConnections() {
 
 func (n *Node) handlePeer(conn net.Conn) {
 	defer conn.Close()
-	
-	// [SEC-CLUSTER-02]: Asignación de límite de lectura inicial para mitigar Slowloris / fugas de hilos
+
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 	reader := bufio.NewReader(conn)
 
@@ -158,40 +155,41 @@ func (n *Node) handlePeer(conn net.Conn) {
 			return
 		}
 
-		// [SEC-CLUSTER-02]: Reset del temporizador de lectura ante actividad legítima detectada
 		conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 		msg = strings.TrimSpace(msg)
 		parts := strings.Split(msg, " ")
-		
-		// [BUG-CLUSTER-01]: Verificación estructural preventiva ante payloads corruptos o vacíos
+
 		if len(parts) == 0 || parts[0] == "" {
 			continue
 		}
 
-		// [SEC-CLUSTER-01]: Intercepción de firma, desarticulación del token y auditoría de integridad
 		cmd := parts[0]
 		if len(parts) > 1 {
 			receivedMac := parts[len(parts)-1]
 			msgBody := strings.Join(parts[:len(parts)-1], " ")
-			
+
 			if !n.verifyMessage(msgBody, receivedMac) {
 				log.Printf("[Cluster] SEC-ALERT: Token rejection on incoming message. Invalid HMAC signature from client origin: %s", conn.RemoteAddr())
 				conn.Write([]byte("ERR_UNAUTHORIZED\n"))
-				return 
+				return
 			}
-			parts = parts[:len(parts)-1] // Saneamiento estructural: removemos la firma para procesar el comando original
+			parts = parts[:len(parts)-1]
 		}
 
 		switch cmd {
 		case "PING":
-			if len(parts) < 3 { continue } // [BUG-CLUSTER-01]: Bounds Check
+			if len(parts) < 3 {
+				continue
+			}
 			senderAddr := parts[1]
 			n.markPeerAlive(senderAddr)
 			conn.Write([]byte("PONG\n"))
 
 		case "HEARTBEAT":
-			if len(parts) < 3 { continue } // [BUG-CLUSTER-01]: Bounds Check
+			if len(parts) < 3 {
+				continue
+			}
 			leaderTerm := 0
 			leaderAddr := parts[2]
 			leaderHttp := ""
@@ -205,7 +203,9 @@ func (n *Node) handlePeer(conn net.Conn) {
 			conn.Write([]byte("PONG_HEARTBEAT\n"))
 
 		case "REPLICATE":
-			if len(parts) < 4 { continue } // [BUG-CLUSTER-01]: Bounds Check
+			if len(parts) < 4 {
+				continue
+			}
 			term := 0
 			fmt.Sscanf(parts[1], "%d", &term)
 			topic := parts[2]
@@ -231,7 +231,9 @@ func (n *Node) handlePeer(conn net.Conn) {
 			}
 
 		case "SYNC_REQ":
-			if len(parts) < 2 { continue } // [BUG-CLUSTER-01]: Bounds Check
+			if len(parts) < 2 {
+				continue
+			}
 			targetAddr := parts[1]
 
 			n.mu.RLock()
@@ -250,7 +252,7 @@ func (n *Node) handlePeer(conn net.Conn) {
 						body := fmt.Sprintf("REPLICATE %d %s %s", term, topic, payloadB64)
 						mac := n.signMessage(body)
 						syncMsg := fmt.Sprintf("%s %s\n", body, mac)
-						
+
 						conn.Write([]byte(syncMsg))
 						reader.ReadString('\n')
 					}
@@ -258,7 +260,9 @@ func (n *Node) handlePeer(conn net.Conn) {
 			}
 
 		case "REQUEST_VOTE":
-			if len(parts) < 3 { continue } // [BUG-CLUSTER-01]: Bounds Check
+			if len(parts) < 3 {
+				continue
+			}
 			candidateTerm := 0
 			fmt.Sscanf(parts[1], "%d", &candidateTerm)
 			candidateAddr := parts[2]
@@ -461,7 +465,7 @@ func (n *Node) requestSync(leaderAddr string) {
 	}
 	defer conn.Close()
 	log.Printf("[Cluster] Requesting state synchronization from Leader...\n")
-	
+
 	body := fmt.Sprintf("SYNC_REQ %s", n.Address)
 	mac := n.signMessage(body)
 	fmt.Fprintf(conn, "%s %s\n", body, mac)
@@ -517,12 +521,11 @@ func (n *Node) electionTimeoutLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			// [BUG-CLUSTER-04]: Corrección de contención crítica en lectura de locks distributivos
 			n.mu.RLock()
 			role := n.Role
 			timeoutExpired := time.Since(n.lastHeartbeatSeen) > 3*time.Second
 			n.mu.RUnlock()
-			
+
 			isDesignatedLeader := os.Getenv("TINYMQ_CLUSTER_LEADER") == "true"
 
 			if role != Leader && timeoutExpired && !isDesignatedLeader {
@@ -559,11 +562,11 @@ func (n *Node) requestVoteFromPeer(addr string, term int) {
 		return
 	}
 	defer conn.Close()
-	
+
 	body := fmt.Sprintf("REQUEST_VOTE %d %s", term, n.Address)
 	mac := n.signMessage(body)
 	fmt.Fprintf(conn, "%s %s\n", body, mac)
-	
+
 	reader := bufio.NewReader(conn)
 	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	resp, err := reader.ReadString('\n')
@@ -575,7 +578,7 @@ func (n *Node) requestVoteFromPeer(addr string, term int) {
 		n.mu.Lock()
 		if n.Role == Candidate && n.CurrentTerm == term {
 			n.votesReceived++
-			quorum := n.calculateQuorum() 
+			quorum := n.calculateQuorum()
 			if n.votesReceived >= quorum {
 				n.Role = Leader
 				log.Printf("[Cluster] Yipiie! We received %d votes. We are the new LEADER for Term %d!\n", n.votesReceived, term)
@@ -595,7 +598,6 @@ func (n *Node) markPeerAlive(addr string) {
 		peer.IsAlive = true
 		peer.LastSeen = time.Now()
 	} else {
-		// [BUG-CLUSTER-05]: Mantener bajo control de lista blanca los descubrimientos dinámicos para evitar vectores DoS
 		log.Printf("[Cluster] Discovered new node %s\n", addr)
 		n.Peers[addr] = &Peer{Address: addr, IsAlive: true, LastSeen: time.Now()}
 	}
