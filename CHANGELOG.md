@@ -38,7 +38,6 @@ All notable changes of the proyect will be documented on this file.
 - **Hot-Path Optimization:** Memoized the `TINYMQ_CLUSTER_NODES` environment variable parsing during Quorum calculation, eliminating expensive OS-level syscalls on every publish action.
 - **Proxy Connection Pooling:** Injected a globally cached `http.Transport` into the Reverse Proxy middleware, allowing Followers to reuse persistent TCP sockets when routing HTTP requests to the Leader (massive throughput boost).
 
-
 ---
 ## [2.7.5] - 2026-06-22 — The Ecosystem Update
 
