@@ -3,6 +3,31 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.8.0] - 2026-06-23 - Home Made - Clustering 
+
+### Added
+- **High Availability Clustering (P2P):** Native, zero-dependency clustering engine for Leader/Follower topologies.
+- **Transparent Reverse Proxy:** Follower nodes automatically proxy mutating HTTP requests (`POST`, `DELETE`, etc.) to the active Leader.
+- **Quorum-Based TCP Replication:** Strict data consistency using an ephemeral TCP protocol (`REPLICATE`) that requires a majority of ACKs before confirming a publish action.
+- **Dynamic Leader Election:** Raft-inspired gossip protocol with `PING` and `HEARTBEAT` timers for automatic failover.
+- **Cluster Authentication:** Introduced `TINYMQ_CLUSTER_SECRET`. All intra-cluster TCP communication is now cryptographically signed and verified via HMAC-SHA256.
+- **MQTT Opt-Out:** New `.env` variable `TINYMQ_MQTT_DISABLE=true` to turn off the MQTT gateway on worker nodes to save file descriptors and TCP sockets.
+
+### Changed
+- Refactored `Broker.Publish` into `publishCore` and `PublishReplicated` to safely decouple local network bindings from cluster-wide synchronization.
+- Dashboard API routes strictly separated between read-only (local) and write operations (proxied to leader).
+
+### Fixed
+- Addressed a potential TCP buffer deadlock in cluster networking by implementing ephemeral, short-lived socket connections instead of persistent locking streams.
+- Fixed a critical resource leak by enforcing a strict 30-second read deadline (`conn.SetDeadline`) on all active cluster TCP connections to prevent Slowloris attacks.
+- Prevented potential panics caused by out-of-bounds array access when receiving malformed TCP commands in the cluster protocol.
+- Fixed `cmd/tinymq/main.go` and `internal/tests/ws_test.go` instantiation errors due to missing dependency injection parameters.
+- Resolved a proxy bug in `/api/queues` where a superfluous `http.Error` was written after a successful Leader proxy redirect, causing a double-write response error.
+- Fixed an accessibility issue in Docker environments by explicitly mapping the Leader's advertised HTTP address for inter-node proxying via the `TINYMQ_CLUSTER_HTTP_ADVERTISE` logic.
+- Corrected the Quorum mathematical calculation to strictly evaluate against the configured cluster size, preventing infinite split-votes or unreachable consensus when dynamically discovering peers.
+- **Critical Persistence Ordering:** Refactored `Broker.publishCore` to persist payloads to the local disk (Write-Ahead Log) *before* triggering network replication, preventing permanent data divergence between the Leader and Followers in the event of an untimely crash.
+
+---
 ## [2.7.5] - 2026-06-22 — The Ecosystem Update
 
 ### Added

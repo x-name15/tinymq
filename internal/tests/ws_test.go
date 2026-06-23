@@ -29,7 +29,7 @@ func setupTestServer(t *testing.T) (*broker.Broker, *rest.Server, string) {
 	l.Close()
 
 	b := broker.New(nil)
-	s := rest.NewServer(b, port, "test-v2.6.0")
+	s := rest.NewServer(b, port, "test-v2.6.0", nil)
 	go s.Start()
 	time.Sleep(50 * time.Millisecond)
 

@@ -382,6 +382,54 @@ func main() {
     select {} // Block forever
 }
 ```
+## 🌐 Appendix: High Availability & Ephemeral Clustering
+
+TinyMQ includes a custom-built, ultra-lightweight, zero-dependency P2P clustering engine designed for high availability and strict data consistency without external consensus tools (like Raft or ZooKeeper).
+
+### Architectural Design
+
+The clustering system works on two fundamental pillars:
+1. **Transparent Leader Proxying:** Followers run in a read-only state for data-modifying mutations. Any HTTP mutation (`/publish/`, `/consume/`, `/ack/`, etc.) hitting a Follower node is automatically intercepted by a high-performance Reverse Proxy and forwarded to the active Leader.
+2. **Quorum-Based Ephemeral Replication:** When the Leader accepts a publish action, it broadcasts the message to all known peers via short-lived TCP sockets using a specialized `REPLICATE` protocol. The operation is only acknowledged to the client (`202 Accepted`) if a strict majority (Quorum) of cluster nodes acknowledge the storage write.
+````
+                  [ Client HTTP Request ]
+                            │
+                            ▼
+                  ┌───────────────────┐
+                  │  Follower Node    │
+                  │  (REST Server)    │
+                  └─────────┬─────────┘
+                            │ (Transparent Proxy)
+                            ▼
+                  ┌───────────────────┐
+                  │    Leader Node    │
+                  │  (REST Server)    │
+                  └─────────┬─────────┘
+                            │
+           ┌────────────────┴────────────────┐
+           ▼ (TCP REPLICATE)                 ▼ (Local Storage)
+┌───────────────────┐               ┌───────────────────┐
+│   Follower Node   │               │   Leader WAL      │
+│   (TCP Socket)    │               │   (Disk Write)    │
+└───────────────────┘               └───────────────────┘
+````
+### Cluster Environment Variables
+
+To activate clustering, configure the following keys in your `.env` file:
+
+* `TINYMQ_CLUSTER_ADDR`: The TCP binding address for intra-cluster communication (e.g., `127.0.0.1:7901`).
+* `TINYMQ_CLUSTER_NODES`: Comma-separated addresses of other cluster participants (e.g., `127.0.0.1:7902,127.0.0.1:7903`).
+* `TINYMQ_CLUSTER_LEADER`: Set to `true` to declare a static, designated Leader node and disable automated election timeouts.
+
+### Operational Verification
+
+To monitor cluster consensus health in real-time, inspect the application logging streams. Active peer discovery, reverse proxy redirection, and atomic synchronization states will output under the `[Cluster]` and `[Proxy]` log scopes:
+
+```bash
+[Cluster] Node 127.0.0.1:7902 is now ONLINE
+[Proxy] Forwarding POST request to Leader (127.0.0.1:7801)
+[Cluster] Message replicated to 2 nodes (Quorum OK)
+```
 
 ### System Limits & Security
 To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
@@ -417,7 +465,13 @@ docker run -d \
 - `TINYMQ_MAX_MESSAGES`: Maximum number of messages held in `RAM` per topic (default `100000`).
 - `TINYMQ_API_KEY`: Secures the broker. If set, all endpoints (including the Dashboard) will require an `Authorization: Bearer  HTTP header`.
 - `TINYMQ_MAX_TOPICS`: Limits the maximum number of unique topics/queues allowed in memory (default `10000`) to protect against DoS attacks.
-- `TINYMQ_MQTT_PORT`: TCP port for the MQTT gateway (default `1883`). **Leave this completely empty to disable the MQTT server** and save resources if you only need HTTP/WS.
+### MQTT Functions
+- `TINYMQ_MQTT_PORT`: TCP port for the MQTT gateway (default `1883`).
+- `TINYMQ_MQTT_DISABLE`: Set to `true` on worker/secondary cluster nodes to shutdown the MQTT protocol server and free critical network file descriptors.
+### Clustering Functions
+- `TINYMQ_CLUSTER_ADDR`: The TCP binding address for intra-cluster communication (e.g., `127.0.0.1:7901`).
+- `TINYMQ_CLUSTER_NODES`: Comma-separated addresses of other cluster participants (e.g., `127.0.0.1:7902,127.0.0.1:7903`).
+- `TINYMQ_CLUSTER_LEADER`: Set to `true` to declare a static, designated Leader node and disable automated election timeouts.
 
 ### Persistent data (Docker Compose)
 

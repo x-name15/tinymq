@@ -40,6 +40,7 @@ type Broker struct {
 	webhookClient   *http.Client
 	idempotencyKeys map[string]time.Time
 	bindings        map[string]map[string]bool
+	OnPublish       func(topic string, payload []byte) error
 }
 
 type TopicStat struct {
@@ -155,6 +156,14 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 }
 
 func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool) error {
+	return b.publishCore(topicName, payload, expiresAt, deliverAt, isBroadcast, false)
+}
+
+func (b *Broker) PublishReplicated(topicName string, payload []byte) error {
+	return b.publishCore(topicName, payload, nil, nil, false, true)
+}
+
+func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool, isReplication bool) error {
 	if !validTopicRegex.MatchString(topicName) {
 		log.Printf("Rejected publish to invalid topic name: %s\n", topicName)
 		return errors.New("invalid topic name")
@@ -171,7 +180,7 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		b.mu.RUnlock()
 
 		for _, dest := range boundTopics {
-			b.Publish(dest, payload, expiresAt, deliverAt, isBroadcast)
+			b.publishCore(dest, payload, expiresAt, deliverAt, isBroadcast, isReplication)
 		}
 	}
 
@@ -219,6 +228,21 @@ func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time,
 		Timestamp: time.Now(),
 		ExpiresAt: expiresAt,
 		DeliverAt: deliverAt,
+	}
+
+	if !isBroadcast && b.storage != nil {
+		if err := b.storage.AppendPut(topicName, msg); err != nil {
+			log.Printf("Error persisting PUT record: %v\n", err)
+		}
+	}
+
+	if !isReplication && b.OnPublish != nil {
+		if err := b.OnPublish(topicName, payload); err != nil {
+			if !isBroadcast && b.storage != nil {
+				b.storage.AppendAck(topicName, msg.ID)
+			}
+			return err
+		}
 	}
 
 	b.mu.RLock()
@@ -819,4 +843,19 @@ func (b *Broker) CreateGroup(topicName, groupName string) (string, error) {
 	}
 
 	return virtualName, nil
+}
+
+func (b *Broker) GetStateSnapshot() map[string][][]byte {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	snapshot := make(map[string][][]byte)
+	for name, topic := range b.Topics {
+		topic.mu.Lock()
+		for _, msg := range topic.Messages {
+			snapshot[name] = append(snapshot[name], msg.Payload)
+		}
+		topic.mu.Unlock()
+	}
+	return snapshot
 }

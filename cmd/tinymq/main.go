@@ -93,12 +93,18 @@ func main() {
 			}
 		}
 	}()
-	
+
+	// Initializing Transports (Ports & Adapters)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "7800"
+	}
+
 	// --- CLUSTERING SYSTEM ---
 	clusterAddr := os.Getenv("TINYMQ_CLUSTER_ADDR")
 	var clusterNode *cluster.Node
 	if clusterAddr != "" {
-		clusterNode = cluster.NewNode(clusterAddr)
+		clusterNode = cluster.NewNode(clusterAddr, port, b)
 		go func() {
 			if err := clusterNode.Start(); err != nil {
 				log.Fatalf("Failed to start cluster node: %v", err)
@@ -108,41 +114,35 @@ func main() {
 		log.Println("Clustering disabled (TINYMQ_CLUSTER_ADDR not set)")
 	}
 
-	// Initializing Transports (Ports & Adapters)
-    port := os.Getenv("PORT")
-    if port == "" {
-        port = "7800"
-    }
+	// Explicit Flag for MQTT Flag
+	mqttDisabled := os.Getenv("TINYMQ_MQTT_DISABLE") == "true"
+	mqttPort := os.Getenv("TINYMQ_MQTT_PORT")
+	if mqttPort == "" && !mqttDisabled {
+		mqttPort = "1883"
+	}
 
-    // NUEVO: Flag explícito para deshabilitar MQTT si se desea
-    mqttDisabled := os.Getenv("TINYMQ_MQTT_DISABLE") == "true"
-    mqttPort := os.Getenv("TINYMQ_MQTT_PORT")
-    if mqttPort == "" && !mqttDisabled {
-        mqttPort = "1883"
-    }
+	restServer := rest.NewServer(b, port, Version, clusterNode)
+	var mqttServer *mqtt.Server
 
-    restServer := rest.NewServer(b, port, Version)
-    var mqttServer *mqtt.Server
-    
-    if mqttPort != "" && !mqttDisabled {
-        mqttServer = mqtt.NewServer(b)
-        go func() {
-            if err := mqttServer.Start(mqttPort); err != nil {
-                log.Fatalf("Failed to start MQTT server: %v", err)
-            }
-        }()
-    } else {
-        log.Println("MQTT server disabled natively via configuration.")
-    }
+	if mqttPort != "" && !mqttDisabled {
+		mqttServer = mqtt.NewServer(b)
+		go func() {
+			if err := mqttServer.Start(mqttPort); err != nil {
+				log.Fatalf("Failed to start MQTT server: %v", err)
+			}
+		}()
+	} else {
+		log.Println("MQTT server disabled natively via configuration.")
+	}
 
-    go func() {
-        if err := restServer.Start(); err != nil {
-            log.Fatalf("Failed to start REST server: %v", err)
-        }
-    }()
+	go func() {
+		if err := restServer.Start(); err != nil {
+			log.Fatalf("Failed to start REST server: %v", err)
+		}
+	}()
 
-    // Graceful Shutdown
-    quit := make(chan os.Signal, 1)
+	// Graceful Shutdown
+	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
