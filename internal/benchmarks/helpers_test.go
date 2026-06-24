@@ -2,6 +2,7 @@ package benchmarks
 
 import (
 	"net"
+	"os"
 	"strconv"
 	"testing"
 
@@ -28,5 +29,6 @@ func setupBrokerWithStorage(b *testing.B) (*broker.Broker, *storage.DiskStorage)
 }
 
 func setupBrokerNoStorage(b *testing.B) *broker.Broker {
+	os.Setenv("TINYMQ_DEFAULT_POLICY", "drop-oldest")
 	return broker.New(nil)
 }

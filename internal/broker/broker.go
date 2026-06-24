@@ -122,7 +122,15 @@ func getMaxTopics() int {
 	return 10000
 }
 
-// getOrCreateTopic obtiene o crea un topic de forma segura, devolviendo siempre el mismo puntero.
+func (b *Broker) compileWildcardRegex(name string) {
+	if _, exists := b.compiledRegex[name]; !exists {
+		regexPattern := "^" + strings.ReplaceAll(name, "*", ".*") + "$"
+		if compiled, err := regexp.Compile(regexPattern); err == nil {
+			b.compiledRegex[name] = compiled
+		}
+	}
+}
+
 func (b *Broker) getOrCreateTopic(name string) *Topic {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -140,6 +148,7 @@ func (b *Broker) getOrCreateTopic(name string) *Topic {
 	b.Topics[name] = t
 	if strings.Contains(name, "*") {
 		b.wildcards[name] = t
+		b.compileWildcardRegex(name)
 	}
 	return t
 }
@@ -178,9 +187,9 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 		b.Topics[name] = t
 		if strings.Contains(name, "*") {
 			b.wildcards[name] = t
+			b.compileWildcardRegex(name)
 		}
 		b.mu.Unlock()
-
 		if len(msgs) > 0 {
 			log.Printf("Recovered topic '%s' with %d unacknowledged messages from disk\n", name, len(msgs))
 		} else {
@@ -232,20 +241,10 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		return errors.New("broker maximum topic limit reached")
 	}
 
-	// Obtener wildcards que coincidan
 	var matchingWildcards []*Topic
 	b.mu.RLock()
 	for name, wildcardT := range b.wildcards {
-		reg, exists := b.compiledRegex[name]
-		if !exists {
-			regexPattern := "^" + strings.ReplaceAll(name, "*", ".*") + "$"
-			compiled, err := regexp.Compile(regexPattern)
-			if err != nil {
-				continue
-			}
-			reg = compiled
-			b.compiledRegex[name] = reg
-		}
+		reg := b.compiledRegex[name]
 		if reg != nil && reg.MatchString(topicName) {
 			matchingWildcards = append(matchingWildcards, wildcardT)
 		}
@@ -307,7 +306,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		}(configs, payload)
 	}
 
-	// Notificar a spies del topic principal
 	t.mu.Lock()
 	spyCount := len(t.spies)
 	for _, spy := range t.spies {
@@ -322,7 +320,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		log.Printf("[Broker] Delivered message %s to %d spies on topic '%s'\n", msg.ID, spyCount, t.Name)
 	}
 
-	// Notificar a spies de wildcards
 	for _, wildcardT := range matchingWildcards {
 		wildcardT.mu.Lock()
 		spyCountW := len(wildcardT.spies)
@@ -354,20 +351,23 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 
 		go func(channels []chan message.Message, m message.Message) {
 			for _, ch := range channels {
-				ch <- m
+				select {
+				case ch <- m:
+				default:
+					log.Printf("[Broker] Broadcast consumer disappeared on topic '%s', message %s dropped\n", m.Topic, m.ID)
+				}
 			}
 		}(broadcastChannels, msg)
 		return nil
 	}
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	if t.Deleted {
+		t.mu.Unlock()
 		return errors.New("topic was concurrently deleted")
 	}
 
-	// Intentar entregar a un consumidor esperando (long-polling)
 	for _, wildcardT := range matchingWildcards {
 		wildcardT.mu.Lock()
 		if len(wildcardT.waitingConsumers) > 0 {
@@ -375,23 +375,39 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			wildcardT.waitingConsumers[0] = nil
 			wildcardT.waitingConsumers = wildcardT.waitingConsumers[1:]
 			wildcardT.mu.Unlock()
-			consumerChan <- msg
-			log.Printf("[Broker] Delivered message %s to waiting consumer on wildcard topic '%s'\n", msg.ID, wildcardT.Name)
-			return nil
+			t.mu.Unlock()
+			select {
+			case consumerChan <- msg:
+				log.Printf("[Broker] Delivered message %s to waiting consumer on wildcard topic '%s'\n", msg.ID, wildcardT.Name)
+				return nil
+			default:
+				log.Printf("[Broker] Waiting consumer on wildcard topic '%s' disappeared, enqueuing message\n", wildcardT.Name)
+				t.mu.Lock()
+			}
+		} else {
+			wildcardT.mu.Unlock()
 		}
-		wildcardT.mu.Unlock()
 	}
 
+	var pendingConsumer chan message.Message
 	if len(t.waitingConsumers) > 0 {
-		consumerChan := t.waitingConsumers[0]
+		pendingConsumer = t.waitingConsumers[0]
 		t.waitingConsumers[0] = nil
 		t.waitingConsumers = t.waitingConsumers[1:]
-		consumerChan <- msg
-		log.Printf("[Broker] Delivered message %s to waiting consumer on topic '%s'\n", msg.ID, t.Name)
-		return nil
 	}
 
-	// Almacenar en cola según prioridad
+	if pendingConsumer != nil {
+		t.mu.Unlock()
+		select {
+		case pendingConsumer <- msg:
+			log.Printf("[Broker] Delivered message %s to waiting consumer on topic '%s'\n", msg.ID, t.Name)
+			return nil
+		default:
+			log.Printf("[Broker] Waiting consumer on topic '%s' disappeared, enqueuing message\n", t.Name)
+			t.mu.Lock()
+		}
+	}
+
 	var targetQueue *[]message.Message
 	switch priority {
 	case "high":
@@ -399,7 +415,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 	case "low":
 		targetQueue = &t.LowMessages
 	default:
-		targetQueue = &t.Messages // normal
+		targetQueue = &t.Messages
 	}
 
 	totalActiveMessages := len(t.HighMessages) + len(t.Messages) + len(t.LowMessages)
@@ -421,11 +437,13 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			}
 			log.Printf("[RingBuffer] Queue '%s' full. Evicted oldest message: %s\n", topicName, oldestMsg.ID)
 		} else {
+			t.mu.Unlock()
 			return errors.New("queue capacity reached (max 100,000 messages)")
 		}
 	}
 	*targetQueue = append(*targetQueue, msg)
 	log.Printf("[Broker] Message %s enqueued on topic '%s' (priority: %s)\n", msg.ID, t.Name, priority)
+	t.mu.Unlock()
 	return nil
 }
 
@@ -433,30 +451,39 @@ func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
 	var results []message.Message
 	now := time.Now()
 
-	for _, queue := range []*[]message.Message{&t.HighMessages, &t.Messages, &t.LowMessages} {
+	extractFrom := func(queue *[]message.Message) {
 		var keep []message.Message
 		for _, msg := range *queue {
 			if len(results) >= limit {
 				keep = append(keep, msg)
 				continue
 			}
+
 			if msg.ExpiresAt != nil && now.After(*msg.ExpiresAt) {
 				if b.storage != nil {
 					b.storage.AppendAck(t.Name, msg.ID)
 				}
 				continue
 			}
+
 			if msg.DeliverAt != nil && now.Before(*msg.DeliverAt) {
 				keep = append(keep, msg)
 				continue
 			}
+
 			results = append(results, msg)
 		}
 		*queue = keep
-		if len(results) >= limit {
-			break
-		}
 	}
+
+	extractFrom(&t.HighMessages)
+	if len(results) < limit {
+		extractFrom(&t.Messages)
+	}
+	if len(results) < limit {
+		extractFrom(&t.LowMessages)
+	}
+
 	return results
 }
 
@@ -465,21 +492,15 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 		return nil, false
 	}
 
-	var reg *regexp.Regexp
-	var matchingTopics []*Topic
+	targetTopic := b.getOrCreateTopic(topicName)
+	if targetTopic == nil {
+		return nil, false
+	}
 
+	var matchingTopics []*Topic
 	if strings.Contains(topicName, "*") {
 		b.mu.RLock()
-		var exists bool
-		reg, exists = b.compiledRegex[topicName]
-		if !exists {
-			regexPattern := "^" + strings.ReplaceAll(topicName, "*", ".*") + "$"
-			compiled, err := regexp.Compile(regexPattern)
-			if err == nil {
-				reg = compiled
-				b.compiledRegex[topicName] = reg
-			}
-		}
+		reg := b.compiledRegex[topicName]
 		if reg != nil {
 			for name, t := range b.Topics {
 				if reg.MatchString(name) {
@@ -488,11 +509,6 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 			}
 		}
 		b.mu.RUnlock()
-	}
-
-	targetTopic := b.getOrCreateTopic(topicName)
-	if targetTopic == nil {
-		return nil, false
 	}
 
 	for _, t := range matchingTopics {
@@ -672,6 +688,7 @@ func (b *Broker) CreateTopic(topicName string, policy string, retention time.Dur
 	b.Topics[topicName] = t
 	if strings.Contains(topicName, "*") {
 		b.wildcards[topicName] = t
+		b.compileWildcardRegex(topicName)
 	}
 	log.Printf("Created Topic '%s' manually via API/Dashboard with policy '%s'\n", topicName, policy)
 	return nil
@@ -792,13 +809,16 @@ func (b *Broker) AddSpy(topicName string) (chan message.Message, error) {
 	if !b.IsValidTopicName(topicName) {
 		return nil, errors.New("invalid topic name")
 	}
+
 	t := b.getOrCreateTopic(topicName)
 	if t == nil {
 		return nil, errors.New("broker maximum topic limit reached")
 	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	ch := make(chan message.Message, 50)
+
+	ch := make(chan message.Message, 1024)
 	t.spies = append(t.spies, ch)
 	log.Printf("[Broker] Added spy on topic '%s' (total spies: %d)\n", topicName, len(t.spies))
 	return ch, nil

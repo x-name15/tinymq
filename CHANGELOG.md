@@ -3,6 +3,15 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.8.3] - 2026-06-24 — Benchmarks and Fixes
+
+### Added
+- **Performance Benchmarks Suite:** Introduced a comprehensive set of benchmarks under `internal/benchmarks/` to measure and track broker performance over time. Covers core operations: publish, consume, ack, priority queues, wildcard routing, broadcast, and concurrency. Includes benchmarks for MQTT gateway, REST API, WebSocket, and clustering replication.
+
+### Fixed
+- **Broker Deadlock under Concurrent Load:** `publishCore` was sending to `waitingConsumers`  channels while holding `t.mu` via `defer Unlock()`, causing all goroutines to deadlock when a consumer channel had no active receiver. Fixed by extracting the channel, releasing the mutex, then sending via non-blocking `select` with re-enqueue on consumer disappearance. Same fix applied to wildcard consumer delivery and broadcast goroutines.
+
+---
 ## [2.8.2] - 2026-06-24 — Cigarettes After Fixes (bcs of the test files)
 
 ### Added
