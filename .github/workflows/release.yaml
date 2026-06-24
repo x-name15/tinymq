@@ -27,6 +27,8 @@ jobs:
         with:
           go-version-file: 'go.mod' 
           
+      - name: Set up QEMU for cross-platform builds
+        uses: docker/setup-qemu-action@v3
       - name: Get version from CHANGELOG
         id: version
         run: |
