@@ -763,3 +763,7 @@ func (s *Server) respondWithQoL(w http.ResponseWriter, msgs []message.Message, l
 		json.NewEncoder(w).Encode(batchRes)
 	}
 }
+
+func (s *Server) Handler() http.Handler {
+	return s.httpServer.Handler
+}

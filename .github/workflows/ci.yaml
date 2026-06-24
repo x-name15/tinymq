@@ -28,11 +28,20 @@ jobs:
           exit 1
         fi
 
-    - name: Run Go Vet (Static Analysis)
-      run: go vet ./...
+    - name: Verify go.mod is tidy
+      run: |
+        go mod tidy
+        if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
+          echo "go.mod or go.sum is not tidy. Please run 'go mod tidy' and commit the changes."
+          git diff
+          exit 1
+        fi
 
-    - name: Run Tests (Race Detector)
-      run: go test -race -timeout 30s ./...
+    - name: Run Tests (Race Detector + Shuffle)
+      run: go test -race -shuffle=on -timeout 30s ./...
+
+    - name: Run Benchmarks (no cache)
+      run: go test -bench=. -benchmem -count=1 -timeout 120s ./internal/benchmarks/...
 
     - name: Build TinyMQ Binary (AMD64)
       run: CGO_ENABLED=0 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
@@ -45,6 +54,15 @@ jobs:
 
     - name: Verify ARM64 Binary
       run: file tinymq-arm64 | grep "ARM aarch64"
+
+    - name: Build Windows Binary (AMD64)
+      run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o tinymq.exe ./cmd/tinymq
+
+    - name: Build macOS Binary (AMD64)
+      run: CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tinymq-darwin ./cmd/tinymq
+
+    - name: Build macOS ARM64 Binary
+      run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o tinymq-darwin-arm64 ./cmd/tinymq
 
     - name: Verify Docker Image Size (AMD64)
       run: |
