@@ -64,7 +64,7 @@ func (s *DiskStorage) writeRecord(topic string, record LogRecord) error {
 
 	file, exists := s.activeFiles[topic]
 	if !exists {
-		filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", strings.ReplaceAll(topic, "/", "@")))
+		filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic))) // ← fix
 		var err error
 		file, err = os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {
@@ -111,9 +111,16 @@ func (s *DiskStorage) LoadMessages(topic string) ([]message.Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", strings.ReplaceAll(topic, "/", "@")))
+	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
+
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		return nil, nil
+		legacyFilename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", strings.ReplaceAll(topic, "/", "@")))
+
+		if _, err := os.Stat(legacyFilename); err == nil {
+			filename = legacyFilename
+		} else {
+			return nil, nil
+		}
 	}
 
 	file, err := os.Open(filename)
@@ -168,7 +175,7 @@ func (s *DiskStorage) CompactLog(topic string) error {
 		delete(s.activeFiles, topic)
 	}
 
-	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", strings.ReplaceAll(topic, "/", "@")))
+	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		return nil
 	}
@@ -259,7 +266,7 @@ func (s *DiskStorage) ClearLog(topic string) error {
 		file.Close()
 	}
 
-	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", strings.ReplaceAll(topic, "/", "@")))
+	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
 	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err == nil {
 		s.activeFiles[topic] = file
@@ -280,10 +287,22 @@ func (s *DiskStorage) DeleteLog(topic string) error {
 		delete(s.activeFiles, topic)
 	}
 
-	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", strings.ReplaceAll(topic, "/", "@")))
+	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
 	err := os.Remove(filename)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	return err
+}
+
+func topicToFilename(topic string) string {
+	safe := strings.ReplaceAll(topic, "/", "_b_")
+	safe = strings.ReplaceAll(safe, "@", "_a_")
+	return safe
+}
+
+func FilenameToTopic(filename string) string {
+	topic := strings.ReplaceAll(filename, "_b_", "/")
+	topic = strings.ReplaceAll(topic, "_a_", "@")
+	return topic
 }

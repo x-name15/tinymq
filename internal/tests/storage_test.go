@@ -104,7 +104,7 @@ func TestStorageCompaction(t *testing.T) {
 	}
 }
 
-// Validate that topics with slashes (MQTT style) are safely flat-mapped to '@' in disk
+// Validate that topics with slashes (MQTT style) are safely encoded with '_b_' codec on disk
 func TestStorageSlashFlatMapping(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "tinymq_test_slashes_*")
 	if err != nil {
@@ -130,7 +130,7 @@ func TestStorageSlashFlatMapping(t *testing.T) {
 		t.Fatalf("Storage rejected slash path write: %v", err)
 	}
 
-	expectedFile := filepath.Join(tempDir, "infra@sensores@temperatura.log")
+	expectedFile := filepath.Join(tempDir, "infra_b_sensores_b_temperatura.log")
 	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
 		t.Errorf("Expected flat file '%s' to exist, but it was not found on disk", expectedFile)
 	}

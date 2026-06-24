@@ -37,6 +37,8 @@ On shutdown (Ctrl+C or `docker stop`) TinyMQ runs `CloseAll()` to flush buffers 
 ### Consumer Groups (Virtual Topic Binding)
 TinyMQ supports Pub/Sub patterns through lightweight Consumer Groups. When a consumer requests a topic with a specific group name (e.g., `?group=emails`), the broker creates a "Virtual Topic" (`topic::emails`) bound to the original. Messages published to the main topic are instantly cloned to all bound virtual topics. This allows multiple independent microservices to consume the same event stream without stealing messages from each other, each maintaining its own independent `.log` file and Dead Letter Queue (DLQ).
 
+> **⚠️ Important Note on Laziness (Non-Retroactive):** Consumer Groups in TinyMQ are created lazily. The virtual sub-queue is born exactly when the first consumer requests it via `?group=name`. Messages published to the main topic **before** the group was first requested will **not** be retroactively copied into the new group. If your architecture requires a group to catch absolutely all messages from the beginning of time, ensure you initialize the group (by making a dummy `/consume` request or doing it via the Dashboard) before turning on your publishers.
+
 ---
 
 ## HTTP API reference (language-agnostic)
@@ -47,14 +49,17 @@ You can interact with TinyMQ via `curl`, Go, Python, Node.js, Rust, etc. Payload
 
 **Endpoint:** `POST /publish/{topic}`
 
-**Headers (Optional):**
-- `Authorization`: Required if `TINYMQ_API_KEY` is set. Format: `Bearer <your_token>`.
-- `Idempotency-Key`: A unique string. If a network retry occurs within 5 minutes with the same key, the broker will safely ignore the duplicate and return `200 OK` (status: `ignored`) without duplicating the payload.
-
 **Query Parameters (Optional):**
 - `ttl` (e.g., `30s`, `1h`): Time-To-Live. The message will be destroyed if not consumed within this window.
 - `delay` (e.g., `5m`, `10s`): Delays the delivery. The message will be hidden from consumers until this time passes.
 - `broadcast` (`true`): Ephemeral Fan-out. Dispatches the message to all currently waiting consumers simultaneously without persisting it to disk.
+- `priority` (`high` | `normal` | `low`): Message priority. Default is `normal`. Within a topic, `high` messages are always consumed before `normal`, and `normal` before `low`. Fully retrocompatible — existing consumers require no changes.
+- `idempotency` (`auto`): Enables automatic deduplication by hashing the payload with SHA256. If the same payload is published again within 5 minutes, the broker silently ignores the duplicate and returns `{"status": "ignored", "reason": "idempotency_key_exists"}`. Useful when the client retries on network errors without managing keys manually.
+
+**Headers (Optional):**
+- `Authorization`: Required if `TINYMQ_API_KEY` is set. Format: `Bearer <your_token>`.
+- `Idempotency-Key`: A unique string. If a network retry occurs within 5 minutes with the same key, the broker safely ignores the duplicate.
+- `X-MQ-*`: Custom user-defined metadata headers. Any header starting with `X-MQ-` (e.g., `X-MQ-Correlation-Id`, `X-MQ-Source`) is stored with the message and returned on consume. Use these to pass routing metadata without modifying your payload schema.
 
 ```bash
 curl -X POST "http://127.0.0.1:7800/publish/orders.eu?delay=5s" \
@@ -69,6 +74,29 @@ curl -X POST "http://127.0.0.1:7800/publish/orders.eu?delay=5s" \
   "status": "accepted",
   "topic": "orders.eu"
 }
+```
+
+### Example with priority and custom headers:
+```bash
+curl -X POST "http://127.0.0.1:7800/publish/emails?priority=high" \
+  -H "X-MQ-Correlation-Id: req-abc-123" \
+  -H "X-MQ-Source: checkout-service" \
+  -d '{"type": "password_reset", "user_id": 42}'
+```
+
+**Alternative Endpoint (JSON Body):**
+If your HTTP client or framework prefers passing arguments via a strict JSON body rather than URL path parameters and query strings (this is the method used internally by the TinyMQ UI Dashboard), you can use the alternate API:
+
+**Endpoint:** `POST /api/queues/publish`
+```bash
+curl -X POST "[http://127.0.0.1:7800/api/queues/publish](http://127.0.0.1:7800/api/queues/publish)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "queue": "orders.eu", 
+    "payload": "{\"user_id\": 42, \"item\": \"laptop\"}", 
+    "delay": "5s",
+    "broadcast": false
+  }'
 ```
 
 ### Consume a message (Pull / Long-Polling)
@@ -92,20 +120,24 @@ curl -X GET "http://127.0.0.1:7800/consume/orders.eu?group=invoices&timeout=10s"
 If `limit=1` (Default), returns a single JSON object. If `limit > 1`, returns a JSON Array.
 
 ```json
-[
-  {
-    "id": "e4b3a1d2-7c89-4b1a-9f5e-123456789abc",
-    "topic": "orders.eu",
-    "payload": "eyJ1c2VyX2lkIjogNDIsICJpdGVtIjogImxhcHRvcCJ9",
-    "timestamp": "2026-06-18T10:00:00Z"
-  }
-]
+{
+  "id": "e4b3a1d2-7c89-4b1a-9f5e-123456789abc",
+  "topic": "orders.eu",
+  "payload": "eyJ1c2VyX2lkIjogNDIsICJpdGVtIjogImxhcHRvcCJ9",
+  "payload_encoding": "base64",
+  "payload_text": "{\"user_id\": 42, \"item\": \"laptop\"}",
+  "headers": {
+    "X-MQ-Correlation-Id": "req-abc-123",
+    "X-MQ-Source": "checkout-service"
+  },
+  "timestamp": "2026-06-18T10:00:00Z"
+}
 ```
 
-*(Binary payloads may be base64-encoded depending on your client.)*
-
-**Response (204):** When timeout expires and no message arrived. (No Content)
-*(Note: As per RFC 7230, a 204 response does not contain a JSON body).*
+- `payload` is always Base64-encoded for binary safety.
+- `payload_encoding` is always `"base64"`.
+- `payload_text` is present only when the payload is valid UTF-8. It contains the decoded string directly — no Base64 decoding needed for simple integrations.
+- `headers` contains any `X-MQ-*` headers that were set at publish time.
 
 ```json
 {
@@ -113,6 +145,22 @@ If `limit=1` (Default), returns a single JSON object. If `limit > 1`, returns a 
   "message": "No messages in topic"
 }
 ```
+
+### Peek without consuming (`?peek=true`)
+
+**Endpoint:** `GET /consume/{topic}?peek=true&limit={N}`
+
+Inspects up to `N` messages in the queue without removing them. This is the REST-native alternative to the Dashboard's `/api/queues/peek` endpoint.
+
+```bash
+# Inspect the next 5 messages in orders.eu without consuming them
+curl "http://127.0.0.1:7800/consume/orders.eu?peek=true&limit=5"
+```
+
+- Returns `200` with the message array if messages are present.
+- Returns `204 No Content` if the topic exists but the queue is empty.
+- Returns `404 Not Found` if the topic has never been created.
+
 ### Real-Time Full-Duplex (WebSockets)
 
 **Endpoint:** `GET /ws`
@@ -158,16 +206,25 @@ curl "[http://127.0.0.1:7800/metrics](http://127.0.0.1:7800/metrics)"
 
 ### Register a Webhook (Push Consumers)
 
-For passive integration, TinyMQ can take the initiative and push messages directly to your external services (Fire-and-Forget).
-> **Security Note:** To prevent Server-Side Request Forgery (SSRF) attacks, the broker strictly validates the provided URL. It will actively reject any webhook destinations that resolve to loopback (`localhost`), private (e.g., `192.168.x.x`, `10.x.x.x`), or link-local internal network addresses.
+For passive integration, TinyMQ can push messages directly to your external services (Fire-and-Forget).
+
+> **Security Note:** To prevent SSRF attacks, the broker rejects webhook destinations that resolve to loopback (`localhost`), private (e.g., `192.168.x.x`, `10.x.x.x`), or link-local internal addresses.
 
 **Endpoint:** `POST /webhook/{topic}`
 
 ```bash
+# Basic webhook (no signature)
 curl -X POST http://127.0.0.1:7800/webhook/orders.eu \
   -H "Content-Type: application/json" \
   -d '{"url": "https://api.my-service.com/incoming"}'
+
+# Webhook with HMAC-SHA256 signing secret
+curl -X POST http://127.0.0.1:7800/webhook/orders.eu \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://api.my-service.com/incoming", "secret": "my-webhook-secret"}'
 ```
+
+When a `secret` is set, TinyMQ adds an `X-TinyMQ-Signature: sha256=<hmac>` header to every delivery, calculated over the raw message payload. The receiver can verify the signature the same way GitHub, Stripe, and others do — ensuring the POST originated from TinyMQ and was not tampered with.
 
 ### Manual acknowledgment (ACK)
 
@@ -183,13 +240,25 @@ curl -X POST http://127.0.0.1:7800/ack/orders.eu/e4b3a1d2-7c89-4b1a-9f5e-1234567
 
 **Endpoint:** `POST /api/topics`
 
-Pre-initialize a topic safely (Validates alphanumeric characters, max length, and idempotency).
+Pre-initialize a topic safely (validates name format, max length, and idempotency).
 
 ```bash
+# Basic topic with default policy
 curl -X POST http://127.0.0.1:7800/api/topics \
   -H "Content-Type: application/json" \
   -d '{"name": "analytics.events"}'
+
+# Topic with sliding retention window — all messages auto-expire after 2h
+# unless they carry an explicit ?ttl= at publish time
+curl -X POST http://127.0.0.1:7800/api/topics \
+  -H "Content-Type: application/json" \
+  -d '{"name": "sensor.temperature", "retain": "2h", "policy": "drop-oldest"}'
 ```
+
+**Body fields:**
+- `name` (required): Topic name. Validated against `^[a-zA-Z0-9._:\-/]+$`, max 255 characters.
+- `policy` (`reject` | `drop-oldest`): Overflow behavior. Defaults to `TINYMQ_DEFAULT_POLICY`.
+- `retain` (e.g. `2h`, `30m`): Automatic TTL applied to every incoming message on this topic. Messages published with an explicit `?ttl=` override this value.
 
 ### Inspect Messages (Peek)
 **Endpoint:** `GET /api/queues/peek?queue={topic}&limit={count}`
@@ -202,6 +271,46 @@ Empties a queue of all messages but keeps the queue and its metadata active.
 ### Delete Queue
 **Endpoint:** `DELETE /api/queues/delete?queue={topic}`
 Completely destroys the queue, its consumers, and permanently deletes its underlying `.log` file.
+
+### Health Check
+
+**Endpoint:** `GET /healthz`
+
+Returns the broker status. Always `200 OK` when the process is running and accepting requests. Designed for Kubernetes liveness/readiness probes, Docker Compose healthchecks, and load balancers.
+
+```bash
+curl http://127.0.0.1:7800/healthz
+```
+
+**Response (standalone mode):**
+```json
+{
+  "status": "ok",
+  "version": "2.8.0",
+  "uptime_seconds": 3600
+}
+```
+
+**Response (cluster mode):**
+```json
+{
+  "status": "ok",
+  "version": "2.8.0",
+  "uptime_seconds": 3600,
+  "cluster_role": "leader",
+  "cluster_term": 3
+}
+```
+
+**Docker Compose healthcheck:**
+```yaml
+healthcheck:
+  test: ["CMD", "wget", "-qO-", "http://localhost:7800/healthz"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 5s
+```
 
 ### Dashboard
 
@@ -236,12 +345,12 @@ MQTT topic layers are fully compatible with TinyMQ's core wildcard architecture.
 Go to the [GitHub Releases page](https://github.com/x-name15/tinymq/releases) and download the binary for your platform:
 > **Keep in MInd:** tmq CLI is bundled with the Broker Server on releases page.
 
-| Platform       | File                      |
-|----------------|---------------------------|
-| Linux (amd64)  | `tinymq-windows-amd64.zip`         |
-| macOS (Intel)  | `tinymq-linux-amd64.tar.gz`        |
-| macOS (Apple Silicon) | `tinymq-darwin-amd64.tar.gz` |
-| Windows        | `tinymq-darwin-arm64.tar.gz`   |
+| Platform              | File                            |
+|-----------------------|---------------------------------|
+| Linux (amd64)         | `tinymq-linux-amd64.tar.gz`    |
+| macOS (Intel)         | `tinymq-darwin-amd64.tar.gz`   |
+| macOS (Apple Silicon) | `tinymq-darwin-arm64.tar.gz`   |
+| Windows               | `tinymq-windows-amd64.zip`     |
 
 On Linux/macOS, make it executable after downloading:
 
@@ -512,7 +621,7 @@ docker run -d \
 
 ### Clustering settings
 
-> ⚠️ **Security:** Without `TINYMQ_CLUSTER_SECRET`, the intra-cluster TCP channel accepts connections from **any peer without authentication**. Always set this variable when the cluster port is reachable from outside a trusted private network.
+>  **Security:** Without `TINYMQ_CLUSTER_SECRET`, the intra-cluster TCP channel accepts connections from **any peer without authentication**. Always set this variable when the cluster port is reachable from outside a trusted private network.
 
 - `TINYMQ_CLUSTER_ADDR`: The TCP address where this node listens for cluster connections (e.g., `127.0.0.1:7901`).
 - `TINYMQ_CLUSTER_NODES`: Comma-separated addresses of other cluster participants (e.g., `127.0.0.1:7902,127.0.0.1:7903`).

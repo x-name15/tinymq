@@ -2,8 +2,10 @@ package rest
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/x-name15/tinymq/internal/broker"
 	"github.com/x-name15/tinymq/internal/cluster"
@@ -65,6 +68,7 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 	mux.HandleFunc("/webhook/", s.leaderProxy(s.withAuth(s.handleRegisterWebhook)))
 	mux.HandleFunc("/api/topics", s.leaderProxy(s.withAuth(s.handleCreateTopic)))
 	mux.HandleFunc("/stream/", s.leaderProxy(s.withAuth(s.handleStream)))
+	mux.HandleFunc("/healthz", s.handleHealthz)
 
 	// UI & Telemetry
 	mux.HandleFunc("/dashboard", s.withAuth(s.handleDashboard))
@@ -233,6 +237,31 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	iKey := r.Header.Get("Idempotency-Key")
+	if r.URL.Query().Get("idempotency") == "auto" {
+		hash := sha256.Sum256(body)
+		iKey = hex.EncodeToString(hash[:])
+	}
+
+	if iKey != "" && s.broker.IsIdempotent(iKey) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fmt.Sprintf(`{"status": "ignored", "reason": "idempotency_key_exists", "topic": "%s"}`, topic)))
+		return
+	}
+
+	userHeaders := make(map[string]string)
+	for k, v := range r.Header {
+		if strings.HasPrefix(strings.ToUpper(k), "X-MQ-") {
+			userHeaders[k] = v[0]
+		}
+	}
+
+	priority := r.URL.Query().Get("priority")
+	if priority == "" {
+		priority = "normal"
+	}
+
 	var expiresAt *time.Time
 	if ttlStr := r.URL.Query().Get("ttl"); ttlStr != "" {
 		if duration, err := time.ParseDuration(ttlStr); err == nil {
@@ -249,16 +278,9 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	iKey := r.Header.Get("Idempotency-Key")
-	if iKey != "" && s.broker.IsIdempotent(iKey) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"status": "ignored", "reason": "idempotency_key_exists", "topic": "%s"}`, topic)))
-		return
-	}
-
 	isBroadcast := r.URL.Query().Get("broadcast") == "true"
-	if err := s.broker.Publish(topic, body, expiresAt, deliverAt, isBroadcast); err != nil {
+
+	if err := s.broker.Publish(topic, body, userHeaders, priority, expiresAt, deliverAt, isBroadcast); err != nil {
 		status := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "capacity") || strings.Contains(err.Error(), "limit") {
 			status = http.StatusTooManyRequests
@@ -286,6 +308,29 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	}
 	topic := parts[2]
 
+	limit := 1
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	if r.URL.Query().Get("peek") == "true" {
+		msgs := s.broker.Peek(topic, limit)
+		if len(msgs) == 0 {
+			if !s.broker.TopicExists(topic) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`{"status": "not_found", "message": "Topic does not exist"}`))
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		s.respondWithQoL(w, msgs, limit)
+		return
+	}
+
 	if group := r.URL.Query().Get("group"); group != "" {
 		vt, err := s.broker.CreateGroup(topic, group)
 		if err != nil {
@@ -299,13 +344,6 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	if timeoutStr := r.URL.Query().Get("timeout"); timeoutStr != "" {
 		if t, err := time.ParseDuration(timeoutStr); err == nil {
 			timeout = t
-		}
-	}
-
-	limit := 1
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
-			limit = parsedLimit
 		}
 	}
 
@@ -325,10 +363,15 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// [Feature 2]: Distinción estricta entre 404 (Topic no existe) y 204 (Topic existe pero vacío)
 	if !ok || len(msgs) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"status": "empty", "message": "No messages"}`))
+		if !s.broker.TopicExists(topic) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"status": "not_found", "message": "Topic does not exist"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -338,12 +381,8 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if limit == 1 && len(msgs) == 1 {
-		json.NewEncoder(w).Encode(msgs[0])
-	} else {
-		json.NewEncoder(w).Encode(msgs)
-	}
+	// Llamada al formateador de Quality of Life
+	s.respondWithQoL(w, msgs, limit)
 }
 
 func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
@@ -410,7 +449,7 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.broker.RegisterWebhook(parts[2], payload.URL)
+	s.broker.RegisterWebhook(parts[2], payload.URL, "")
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte(`{"status": "webhook_registered"}`))
 }
@@ -419,6 +458,7 @@ func (s *Server) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		Name   string `json:"name"`
 		Policy string `json:"policy"`
+		Retain string `json:"retain"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -430,7 +470,17 @@ func (s *Server) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		payload.Policy = os.Getenv("TINYMQ_DEFAULT_POLICY")
 	}
 
-	if err := s.broker.CreateTopic(payload.Name, payload.Policy); err != nil {
+	var retention time.Duration
+	if payload.Retain != "" {
+		d, err := time.ParseDuration(payload.Retain)
+		if err != nil {
+			http.Error(w, "Invalid retain duration (use Go duration format: 1h, 30m, etc.)", http.StatusBadRequest)
+			return
+		}
+		retention = d
+	}
+
+	if err := s.broker.CreateTopic(payload.Name, payload.Policy, retention); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -567,7 +617,7 @@ func (s *Server) handleQueuePublish(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.broker.Publish(req.Queue, []byte(req.Payload), expiresAt, deliverAt, req.Broadcast); err != nil {
+	if err := s.broker.Publish(req.Queue, []byte(req.Payload), nil, "normal", expiresAt, deliverAt, req.Broadcast); err != nil {
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
@@ -651,4 +701,53 @@ func validateWebhookURL(rawURL string) error {
 		}
 	}
 	return nil
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	uptime := time.Since(s.startTime).Seconds()
+
+	res := map[string]any{
+		"status":         "ok",
+		"version":        s.version,
+		"uptime_seconds": int(uptime),
+	}
+
+	if s.clusterNode != nil {
+		role := "follower"
+		if s.clusterNode.IsLeader() {
+			role = "leader"
+		}
+		res["cluster_role"] = role
+		res["cluster_term"] = s.clusterNode.CurrentTerm
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(res)
+}
+
+func (s *Server) respondWithQoL(w http.ResponseWriter, msgs []message.Message, limit int) {
+	w.Header().Set("Content-Type", "application/json")
+
+	type QoLMessageResponse struct {
+		message.Message
+		PayloadEncoding string `json:"payload_encoding"`
+		PayloadText     string `json:"payload_text,omitempty"`
+	}
+
+	var batchRes []QoLMessageResponse
+	for _, m := range msgs {
+		qol := QoLMessageResponse{Message: m, PayloadEncoding: "base64"}
+
+		if utf8.Valid(m.Payload) {
+			qol.PayloadText = string(m.Payload)
+		}
+		batchRes = append(batchRes, qol)
+	}
+
+	if limit == 1 && len(batchRes) == 1 {
+		json.NewEncoder(w).Encode(batchRes[0])
+	} else {
+		json.NewEncoder(w).Encode(batchRes)
+	}
 }

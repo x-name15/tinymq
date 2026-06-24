@@ -253,7 +253,7 @@ func (s *Server) handlePublish(mc *mqttConn, flags byte, payload []byte) error {
 
 	msgPayload := payload[offset:]
 
-	if err := s.broker.Publish(topic, msgPayload, nil, nil, false); err != nil {
+	if err := s.broker.Publish(topic, msgPayload, nil, "normal", nil, nil, false); err != nil {
 		log.Printf("[MQTT] Failed to publish to broker: %v", err)
 		return err
 	}

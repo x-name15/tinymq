@@ -3,6 +3,9 @@ package broker
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -20,13 +23,21 @@ import (
 	"github.com/x-name15/tinymq/internal/storage"
 )
 
+type WebhookConfig struct {
+	URL    string
+	Secret string
+}
+
 type Topic struct {
 	Name             string
 	Messages         []message.Message
+	HighMessages     []message.Message
+	LowMessages      []message.Message
 	waitingConsumers []chan message.Message
 	spies            []chan message.Message
 	Policy           string
 	Deleted          bool
+	Retention        time.Duration
 	mu               sync.Mutex
 }
 
@@ -36,7 +47,7 @@ type Broker struct {
 	wildcards       map[string]*Topic
 	storage         *storage.DiskStorage
 	compiledRegex   map[string]*regexp.Regexp
-	webhooks        map[string][]string
+	webhooks        map[string][]WebhookConfig
 	webhookClient   *http.Client
 	idempotencyKeys map[string]time.Time
 	bindings        map[string]map[string]bool
@@ -88,7 +99,7 @@ func New(store *storage.DiskStorage) *Broker {
 		wildcards:       make(map[string]*Topic),
 		storage:         store,
 		compiledRegex:   make(map[string]*regexp.Regexp),
-		webhooks:        make(map[string][]string),
+		webhooks:        make(map[string][]WebhookConfig),
 		webhookClient:   &http.Client{Timeout: 10 * time.Second, Transport: secureTransport},
 		idempotencyKeys: make(map[string]time.Time),
 		bindings:        make(map[string]map[string]bool),
@@ -156,19 +167,23 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 	}
 }
 
-func (b *Broker) Publish(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool) error {
-	return b.publishCore(topicName, payload, expiresAt, deliverAt, isBroadcast, false, 0) // <-- Añadimos el 0 inicial
+func (b *Broker) Publish(topicName string, payload []byte, headers map[string]string, priority string, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool) error {
+	return b.publishCore(topicName, payload, headers, priority, expiresAt, deliverAt, isBroadcast, false, 0)
 }
 
 func (b *Broker) PublishReplicated(topicName string, payload []byte) error {
-	return b.publishCore(topicName, payload, nil, nil, false, true, 0)
+	return b.publishCore(topicName, payload, nil, "normal", nil, nil, false, true, 0)
 }
 
-func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool, isReplication bool, depth int) error {
+func (b *Broker) publishCore(topicName string, payload []byte, headers map[string]string, priority string, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool, isReplication bool, depth int) error {
 
 	if depth > 10 {
 		log.Printf("[Broker] SEC-ALERT: Binding loop or max depth detected resolving topic '%s'", topicName)
 		return errors.New("binding loop detected")
+	}
+
+	if len(topicName) == 0 || len(topicName) > 255 {
+		return errors.New("invalid topic name length (must be between 1 and 255 characters)")
 	}
 
 	if !validTopicRegex.MatchString(topicName) {
@@ -187,7 +202,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.T
 		b.mu.RUnlock()
 
 		for _, dest := range boundTopics {
-			b.publishCore(dest, payload, expiresAt, deliverAt, isBroadcast, isReplication, depth+1)
+			b.publishCore(dest, payload, headers, priority, expiresAt, deliverAt, isBroadcast, isReplication, depth+1)
 		}
 	}
 
@@ -228,6 +243,11 @@ func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.T
 	}
 	b.mu.Unlock()
 
+	if expiresAt == nil && t.Retention > 0 {
+		exp := time.Now().Add(t.Retention)
+		expiresAt = &exp
+	}
+
 	msg := message.Message{
 		ID:        helper.NewUUID(),
 		Topic:     topicName,
@@ -235,6 +255,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.T
 		Timestamp: time.Now(),
 		ExpiresAt: expiresAt,
 		DeliverAt: deliverAt,
+		Headers:   headers,
 	}
 
 	if !isBroadcast && b.storage != nil {
@@ -253,20 +274,30 @@ func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.T
 	}
 
 	b.mu.RLock()
-	urls := b.webhooks[topicName]
+	configs := b.webhooks[topicName]
 	b.mu.RUnlock()
 
-	if len(urls) > 0 {
-		go func(endpoints []string, data []byte) {
-			for _, u := range endpoints {
-				resp, err := b.webhookClient.Post(u, "application/json", bytes.NewBuffer(data))
+	if len(configs) > 0 {
+		go func(endpoints []WebhookConfig, data []byte) {
+			for _, wh := range endpoints {
+				req, _ := http.NewRequest("POST", wh.URL, bytes.NewBuffer(data))
+				req.Header.Set("Content-Type", "application/json")
+
+				if wh.Secret != "" {
+					mac := hmac.New(sha256.New, []byte(wh.Secret))
+					mac.Write(data)
+					signature := hex.EncodeToString(mac.Sum(nil))
+					req.Header.Set("X-TinyMQ-Signature", "sha256="+signature)
+				}
+
+				resp, err := b.webhookClient.Do(req)
 				if err == nil {
 					resp.Body.Close()
 				} else {
-					log.Printf("Webhook delivery failed to %s: %v\n", u, err)
+					log.Printf("Webhook delivery failed to %s: %v\n", wh.URL, err)
 				}
 			}
-		}(urls, payload)
+		}(configs, payload)
 	}
 
 	t.mu.Lock()
@@ -322,12 +353,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.T
 		return errors.New("topic was concurrently deleted")
 	}
 
-	if b.storage != nil {
-		if err := b.storage.AppendPut(topicName, msg); err != nil {
-			log.Printf("Error persisting PUT record: %v\n", err)
-		}
-	}
-
 	for _, wildcardT := range matchingWildcards {
 		wildcardT.mu.Lock()
 		if len(wildcardT.waitingConsumers) > 0 {
@@ -349,10 +374,32 @@ func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.T
 		return nil
 	}
 
-	if len(t.Messages) >= getMaxMessages() {
+	var targetQueue *[]message.Message
+	switch priority {
+	case "high":
+		targetQueue = &t.HighMessages
+	case "low":
+		targetQueue = &t.LowMessages
+	default:
+		targetQueue = &t.Messages // normal
+	}
+
+	// Validación de políticas de RingBuffer
+	totalActiveMessages := len(t.HighMessages) + len(t.Messages) + len(t.LowMessages)
+	if totalActiveMessages >= getMaxMessages() {
 		if t.Policy == "drop-oldest" {
-			oldestMsg := t.Messages[0]
-			t.Messages = t.Messages[1:]
+			// Sacamos el mensaje más viejo evaluando las colas en cascada (low -> normal -> high)
+			var oldestMsg message.Message
+			if len(t.LowMessages) > 0 {
+				oldestMsg = t.LowMessages[0]
+				t.LowMessages = t.LowMessages[1:]
+			} else if len(t.Messages) > 0 {
+				oldestMsg = t.Messages[0]
+				t.Messages = t.Messages[1:]
+			} else {
+				oldestMsg = t.HighMessages[0]
+				t.HighMessages = t.HighMessages[1:]
+			}
 
 			if b.storage != nil {
 				if err := b.storage.AppendAck(topicName, oldestMsg.ID); err != nil {
@@ -365,7 +412,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, expiresAt *time.T
 		}
 	}
 
-	t.Messages = append(t.Messages, msg)
+	*targetQueue = append(*targetQueue, msg)
 
 	return nil
 }
@@ -473,9 +520,14 @@ func (b *Broker) GetStats() ([]TopicStat, int) {
 	for k, v := range b.Topics {
 		topicsCopy[k] = v
 	}
+
 	webhooksCopy := make(map[string][]string, len(b.webhooks))
 	for k, v := range b.webhooks {
-		webhooksCopy[k] = v
+		var urls []string
+		for _, wh := range v {
+			urls = append(urls, wh.URL)
+		}
+		webhooksCopy[k] = urls
 	}
 	b.mu.RUnlock()
 
@@ -489,7 +541,7 @@ func (b *Broker) GetStats() ([]TopicStat, int) {
 		_, hasWebhook := webhooksCopy[name]
 
 		t.mu.Lock()
-		msgCount := len(t.Messages)
+		msgCount := len(t.Messages) + len(t.HighMessages) + len(t.LowMessages)
 		consumerCount := len(t.waitingConsumers)
 		t.mu.Unlock()
 
@@ -605,18 +657,27 @@ func (b *Broker) Requeue(msg message.Message) {
 	t.Messages = append(t.Messages, msg)
 }
 
-func (b *Broker) RegisterWebhook(topic, callbackURL string) {
+func (b *Broker) RegisterWebhook(topicName string, callbackURL string, secret string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.webhooks[topic] = append(b.webhooks[topic], callbackURL)
-	log.Printf("Registered Webhook for topic '%s' -> %s\n", topic, callbackURL)
+
+	for _, wh := range b.webhooks[topicName] {
+		if wh.URL == callbackURL {
+			return errors.New("webhook already registered for this topic")
+		}
+	}
+
+	b.webhooks[topicName] = append(b.webhooks[topicName], WebhookConfig{
+		URL:    callbackURL,
+		Secret: secret,
+	})
+	return nil
 }
 
-func (b *Broker) CreateTopic(topicName string, policy string) error {
+func (b *Broker) CreateTopic(topicName string, policy string, retention time.Duration) error {
 	if len(topicName) == 0 || len(topicName) > 255 {
 		return errors.New("Invalid name length (1-255 characters)")
 	}
-
 	if !validTopicRegex.MatchString(topicName) {
 		return errors.New("The name can only contain letters, numbers, '.', '-' and '_'")
 	}
@@ -627,16 +688,14 @@ func (b *Broker) CreateTopic(topicName string, policy string) error {
 	if len(b.Topics) >= getMaxTopics() {
 		return errors.New("broker maximum topic limit reached")
 	}
-
 	if _, exists := b.Topics[topicName]; exists {
 		return errors.New("the Topic already exists")
 	}
-
 	if policy != "drop-oldest" {
 		policy = "reject"
 	}
 
-	t := &Topic{Name: topicName, Policy: policy}
+	t := &Topic{Name: topicName, Policy: policy, Retention: retention}
 	b.Topics[topicName] = t
 	if strings.Contains(topicName, "*") {
 		b.wildcards[topicName] = t
@@ -731,9 +790,12 @@ func (b *Broker) GetWebhooks(topicName string) []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	urls := b.webhooks[topicName]
-	result := make([]string, len(urls))
-	copy(result, urls)
+	configs := b.webhooks[topicName]
+
+	result := make([]string, 0, len(configs))
+	for _, wh := range configs {
+		result = append(result, wh.URL)
+	}
 	return result
 }
 
@@ -867,6 +929,8 @@ func (b *Broker) GetStateSnapshot() []message.Message {
 	for _, t := range topics {
 		t.mu.Lock()
 		allMessages = append(allMessages, t.Messages...)
+		allMessages = append(allMessages, t.HighMessages...)
+		allMessages = append(allMessages, t.LowMessages...)
 		t.mu.Unlock()
 	}
 	return allMessages

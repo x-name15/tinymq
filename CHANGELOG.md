@@ -3,7 +3,37 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
-## [2.8.0] - 2026-06-22 — Homemade Clustering Feature and More Stability and Security Fixes
+## [2.8.1] - 2026-06-24 — The "QoL for U" Update
+
+### Added
+- **Dev Container:** Added `.devcontainer/` configuration (Go 1.26-alpine3.24, golangci-lint, mosquitto-clients) for one-click development environments in VS Code and GitHub Codespaces.
+- **Explicit Payload Telemetry:** Added an inline `payload_encoding: "base64"` field to consumer HTTP payloads to instantly guide developers during service integrations.
+- **User-Defined Headers:** Support for `X-MQ-*` custom metadata headers in publish/consume requests.
+- **Topic-Level Retention:** Added automatic message TTL configuration per topic via `?retain=...` policy.
+- **Webhook HMAC Signing:** Added `X-TinyMQ-Signature` (SHA256) header for secure webhook delivery verification.
+- **Healthcheck Endpoint:** Introduced `/healthz` for Kubernetes/Orchestrator monitoring.
+- **Auto-Idempotency:** Native SHA256-based request deduplication triggered via `?idempotency=auto`.
+- **Inline Payload Text:** Added `payload_text` field for UTF-8 payloads to avoid Base64 decoding for simple integration testing.
+
+### Changed
+- **Semantical REST Compliance:** Changed empty queue responses from an ambiguous `404 Not Found` status down to a correct, body-less `204 No Content` structure, aligning with RFC 7230 polling frameworks.
+- **Consumer Group Lifecycle:** Added explicit architectural documentation clarifying the lazy, non-retroactive nature of virtual topic bindings to align expectations for engineers migrating from Kafka.
+- **API Discoverability:** Officially documented the JSON-body alternative endpoints (`/api/queues/*`) previously hidden as internal dashboard routes, eliminating DX confusion regarding differing URL styles.
+
+### Fixed
+- **WAL Silent Data Corruption:** Migrated the storage layer from a flat character substitution (`@` for `/`) to an escaped token codec (`_b_` and `_a_`), eliminating name collisions and log corruption when handling topics with legitimate special characters.
+- **Topic Length Boundary:** Enforced a strict maximum length ceiling of 255 characters on topic naming processing pipelines inside `publishCore`.
+- **CLI Help Typo:** Cleaned duplicate output definitions for `bench` and `backup` commands in `tmq` help utilities.
+- **Topic-Level Retention (completed):** `POST /api/topics` now accepts a `retain` field (Go duration string, e.g. `"2h"`, `"30m"`). Previously the `Retention` field existed in the `Topic` struct and was applied in `publishCore`, but `handleCreateTopic` and `broker.CreateTopic` did not expose it — making the feature unreachable via API. The circuit is now closed end-to-end.
+- **WAL Codec Regression:** `writeRecord` was still using the legacy `@` substitution codec when opening new log files, while all read paths (`LoadMessages`, `CompactLog`, `ClearLog`, `DeleteLog`) had already been migrated to the `_b_`/`_a_` escaped token codec. New files are now created with the correct codec, consistent with the rest of the storage layer.
+
+### Documentation
+- **Fully documented 7 features shipped in v2.8.1 but missing from DOCUMENTATION.md:** `/healthz`, `?priority=high|normal|low`, `X-MQ-*` user headers, `payload_text` + `payload_encoding` in consume responses, `?peek=true` on `/consume/{topic}`, `?idempotency=auto`, and webhook HMAC signing (`secret` + `X-TinyMQ-Signature`).
+- **Completed `retain` documentation** in `POST /api/topics` section now that the API implementation is complete.
+- **Fixed CLI download table** — platform-to-filename mapping was swapped between Linux, macOS, and Windows entries.
+
+---
+## [2.8.0] - 2026-06-23 — Homemade Clustering Feature and More Stability and Security Fixes
 
 ### Added
 - **High Availability Clustering (P2P):** Native, zero-dependency clustering engine for Leader/Follower topologies.

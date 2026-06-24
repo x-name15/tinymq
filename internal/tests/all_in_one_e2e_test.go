@@ -114,7 +114,7 @@ func TestAllInOne_EndToEnd_Flow(t *testing.T) {
 
 	payload := []byte("FIRE_ALERT_99C")
 
-	err = b1.Publish(targetTopic, payload, nil, nil, false)
+	err = b1.Publish(targetTopic, payload, nil, "normal", nil, nil, false)
 	if err != nil {
 		t.Fatalf("Base publish operation failed: %v", err)
 	}

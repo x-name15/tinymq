@@ -42,8 +42,14 @@ func main() {
 		var topicsToRecover []string
 		for _, file := range files {
 			if !file.IsDir() && filepath.Ext(file.Name()) == ".log" {
-				topicName := strings.TrimSuffix(file.Name(), ".log")
-				topicName = strings.ReplaceAll(topicName, "@", "/")
+				encodedName := strings.TrimSuffix(file.Name(), ".log")
+				var topicName string
+				if strings.Contains(encodedName, "_b_") || strings.Contains(encodedName, "_a_") {
+					topicName = storage.FilenameToTopic(encodedName)
+				} else {
+					topicName = strings.ReplaceAll(encodedName, "@", "/")
+				}
+
 				topicsToRecover = append(topicsToRecover, topicName)
 			}
 		}
@@ -54,7 +60,7 @@ func main() {
 				if err := store.CompactLog(name); err != nil {
 					log.Printf("Failed to compact log for topic %s: %v\n", name, err)
 				} else {
-					log.Printf("Log for topic '%s' successfully compacted!\n", name)
+					log.Printf("Log for topic '%s' successfully compacted and verified!\n", name)
 				}
 			}
 		}

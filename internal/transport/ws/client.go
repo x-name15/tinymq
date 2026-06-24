@@ -144,7 +144,7 @@ func (c *Client) handleCommand(raw []byte) {
 			c.sendError("topic required")
 			return
 		}
-		err := c.hub.broker.Publish(cmd.Topic, []byte(cmd.Payload), nil, nil, false)
+		err := c.hub.broker.Publish(cmd.Topic, []byte(cmd.Payload), nil, "normal", nil, nil, false)
 		if err != nil {
 			c.sendError(err.Error())
 		} else {

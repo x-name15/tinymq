@@ -12,7 +12,7 @@ import (
 func TestPublishDoesNotDeadlock(t *testing.T) {
 	b := broker.New(nil)
 
-	err := b.Publish("orders", []byte("hello"), nil, nil, false)
+	err := b.Publish("orders", []byte("hello"), nil, "normal", nil, nil, false)
 	if err != nil {
 		t.Fatalf("Publish returned an error: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestIsValidTopicName(t *testing.T) {
 func TestCreateTopicAndLimit(t *testing.T) {
 	b := broker.New(nil)
 
-	err := b.CreateTopic("sensor.data", "reject")
+	err := b.CreateTopic("sensor.data", "reject", 0)
 	if err != nil {
 		t.Fatalf("Failed to create topic: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestCreateTopicAndLimit(t *testing.T) {
 func TestConsumeAndAck(t *testing.T) {
 	b := broker.New(nil)
 
-	b.Publish("alerts", []byte("msg1"), nil, nil, false)
+	b.Publish("alerts", []byte("msg1"), nil, "normal", nil, nil, false)
 
 	msgID := b.Topics["alerts"].Messages[0].ID
 
@@ -100,7 +100,7 @@ func TestWildcardRouting(t *testing.T) {
 	notifyChan := make(chan message.Message, 1)
 	b.Consume("events.*", 1, notifyChan)
 
-	err := b.Publish("events.login", []byte("user_logged_in"), nil, nil, false)
+	err := b.Publish("events.login", []byte("user_logged_in"), nil, "normal", nil, nil, false)
 	if err != nil {
 		t.Fatalf("Publish failed: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestWildcardRouting(t *testing.T) {
 func TestDLQAfterThreeRetries(t *testing.T) {
 	b := broker.New(nil)
 
-	b.Publish("tasks", []byte("fail_me"), nil, nil, false)
+	b.Publish("tasks", []byte("fail_me"), nil, "normal", nil, nil, false)
 
 	notifyChan := make(chan message.Message, 1)
 	msgs, _ := b.Consume("tasks", 1, notifyChan)
@@ -147,7 +147,7 @@ func TestTTLExpiration(t *testing.T) {
 	now := time.Now()
 	expiredTime := now.Add(-1 * time.Minute)
 
-	b.Publish("ephemeral", []byte("too_late"), &expiredTime, nil, false)
+	b.Publish("ephemeral", []byte("too_late"), nil, "normal", &expiredTime, nil, false)
 
 	notifyChan := make(chan message.Message, 1)
 	msgs, ok := b.Consume("ephemeral", 1, notifyChan)
@@ -171,13 +171,11 @@ func TestBroadcastMode(t *testing.T) {
 	b.Consume("notifications", 1, ch1)
 	b.Consume("notifications", 1, ch2)
 
-	err := b.Publish("notifications", []byte("system_update"), nil, nil, true)
+	err := b.Publish("notifications", []byte("system_update"), nil, "normal", nil, nil, true)
 	if err != nil {
 		t.Fatalf("Broadcast publish failed: %v", err)
 	}
 
-	// Usamos un pequeño timeout en lugar de un default instantáneo
-	// porque el broadcast del broker ocurre en una goroutine asíncrona.
 	select {
 	case <-ch1:
 	case <-time.After(500 * time.Millisecond):
