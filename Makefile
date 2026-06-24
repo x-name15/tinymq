@@ -21,10 +21,14 @@ clean:
 	rm -rf bin/ data/
 	go clean
 
+bench:
+	go test -bench=. -benchmem ./internal/benchmarks/...
+
 help:
-	@echo "Comandos disponibles:"
-	@echo "  make build  - Compila el binario"
-	@echo "  make run    - Ejecuta el proyecto"
-	@echo "  make fmt    - Formatea el código"
-	@echo "  make test   - Ejecuta los tests con race detector"
-	@echo "  make clean  - Limpia binarios y data"
+	@echo "Available commands:"
+	@echo "  make build  - Build the binary"
+	@echo "  make run    - Run the project"
+	@echo "  make fmt    - Format the code"
+	@echo "  make bench  - Run performance benchmarks"
+	@echo "  make test   - Run tests with race detector"
+	@echo "  make clean  - Clean binaries and data"

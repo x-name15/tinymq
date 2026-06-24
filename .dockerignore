@@ -16,14 +16,18 @@ data/
 .git/
 .gitignore
 
+#Ignore Repomix
+repomix-output*.xml
+
 # Ignore local binaries and CLI source (Docker only needs the broker)
 bin/
 cmd/tmq/
 tmq
 tmq.exe
 
-# Ignore tests to keep the build context clean and optimize cache
+# Ignore tests and Benchmarks to keep the build context clean and optimize cache
 internal/tests/
+internal/benchmarks/
 *_test.go
 
 #Ignore devContainer files
