@@ -25,18 +25,19 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod' 
+          go-version-file: 'go.mod'
           
-      - name: Set up QEMU for cross-platform builds
+      - name: Set up QEMU for cross-platform builds 
         uses: docker/setup-qemu-action@v3
-      
-      - name: Set up Docker Buildx
+
+      - name: Set up Docker Buildx 
         uses: docker/setup-buildx-action@v3
-        with: 
+        with:
           driver: docker-container
           driver-opts: |
-            image=moby/buildkit:master
+            image=moby/buildkit:latest
             network=host
+
       - name: Get version from CHANGELOG
         id: version
         run: |
@@ -110,7 +111,7 @@ jobs:
           # Source Code Zip
           git archive --format=zip -o dist/tinymq-source-${VERSION}.zip HEAD
 
-          #Generate SHA-256 signatures
+          # Generate SHA-256 signatures
           cd dist
           sha256sum * > tinymq-${VERSION}-checksums.txt
           cd ..
@@ -155,6 +156,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build and push Docker images
         uses: docker/build-push-action@v5
         with:
