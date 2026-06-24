@@ -186,8 +186,11 @@ func (c *Client) handleCommand(raw []byte) {
 					}
 					bytes, _ := json.Marshal(msg)
 					if err := c.sendMessage(string(bytes)); err != nil {
+						log.Printf("[WS] Error sending message to client: %v", err)
 						return
 					}
+					log.Printf("[WS] TX (%s) topic=%s len=%d", c.conn.RemoteAddr().String(), topic, len(msg.Payload))
+					log.Printf("[WS] Sent message %s to client on topic %s\n", msg.ID, topic)
 				case <-c.done:
 					return
 				}

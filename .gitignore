@@ -11,7 +11,7 @@ data/*.log
 tinymq.exe
 
 #Repomix
-repomix-output.xml
+repomix-output*.xml
 
 #Local Actions
 .github/workflows/local.test.yaml

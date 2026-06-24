@@ -122,6 +122,28 @@ func getMaxTopics() int {
 	return 10000
 }
 
+// getOrCreateTopic obtiene o crea un topic de forma segura, devolviendo siempre el mismo puntero.
+func (b *Broker) getOrCreateTopic(name string) *Topic {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if t, ok := b.Topics[name]; ok {
+		return t
+	}
+	if len(b.Topics) >= getMaxTopics() {
+		return nil
+	}
+	policy := os.Getenv("TINYMQ_DEFAULT_POLICY")
+	if policy != "drop-oldest" {
+		policy = "reject"
+	}
+	t := &Topic{Name: name, Policy: policy}
+	b.Topics[name] = t
+	if strings.Contains(name, "*") {
+		b.wildcards[name] = t
+	}
+	return t
+}
+
 func (b *Broker) LoadExistingTopics(topicNames []string) {
 	defaultPolicy := os.Getenv("TINYMQ_DEFAULT_POLICY")
 	if defaultPolicy != "drop-oldest" {
@@ -176,7 +198,6 @@ func (b *Broker) PublishReplicated(topicName string, payload []byte) error {
 }
 
 func (b *Broker) publishCore(topicName string, payload []byte, headers map[string]string, priority string, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool, isReplication bool, depth int) error {
-
 	if depth > 10 {
 		log.Printf("[Broker] SEC-ALERT: Binding loop or max depth detected resolving topic '%s'", topicName)
 		return errors.New("binding loop detected")
@@ -206,26 +227,14 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		}
 	}
 
-	b.mu.Lock()
-	if _, exists := b.Topics[topicName]; !exists {
-		if len(b.Topics) >= getMaxTopics() {
-			b.mu.Unlock()
-			return errors.New("broker maximum topic limit reached")
-		}
-
-		policy := os.Getenv("TINYMQ_DEFAULT_POLICY")
-		if policy != "drop-oldest" {
-			policy = "reject"
-		}
-		t := &Topic{Name: topicName, Policy: policy}
-		b.Topics[topicName] = t
-		if strings.Contains(topicName, "*") {
-			b.wildcards[topicName] = t
-		}
+	t := b.getOrCreateTopic(topicName)
+	if t == nil {
+		return errors.New("broker maximum topic limit reached")
 	}
-	t := b.Topics[topicName]
 
+	// Obtener wildcards que coincidan
 	var matchingWildcards []*Topic
+	b.mu.RLock()
 	for name, wildcardT := range b.wildcards {
 		reg, exists := b.compiledRegex[name]
 		if !exists {
@@ -241,7 +250,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			matchingWildcards = append(matchingWildcards, wildcardT)
 		}
 	}
-	b.mu.Unlock()
+	b.mu.RUnlock()
 
 	if expiresAt == nil && t.Retention > 0 {
 		exp := time.Now().Add(t.Retention)
@@ -273,23 +282,21 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		}
 	}
 
+	// Webhooks
 	b.mu.RLock()
 	configs := b.webhooks[topicName]
 	b.mu.RUnlock()
-
 	if len(configs) > 0 {
 		go func(endpoints []WebhookConfig, data []byte) {
 			for _, wh := range endpoints {
 				req, _ := http.NewRequest("POST", wh.URL, bytes.NewBuffer(data))
 				req.Header.Set("Content-Type", "application/json")
-
 				if wh.Secret != "" {
 					mac := hmac.New(sha256.New, []byte(wh.Secret))
 					mac.Write(data)
 					signature := hex.EncodeToString(mac.Sum(nil))
 					req.Header.Set("X-TinyMQ-Signature", "sha256="+signature)
 				}
-
 				resp, err := b.webhookClient.Do(req)
 				if err == nil {
 					resp.Body.Close()
@@ -300,38 +307,46 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		}(configs, payload)
 	}
 
+	// Notificar a spies del topic principal
 	t.mu.Lock()
+	spyCount := len(t.spies)
 	for _, spy := range t.spies {
 		select {
 		case spy <- msg:
 		default:
-			log.Printf("[WS/SSE] Spy buffer full for topic '%s', message %s dropped\n", t.Name, msg.ID)
+			log.Printf("[Broker] Spy buffer full for topic '%s', message %s dropped\n", t.Name, msg.ID)
 		}
 	}
 	t.mu.Unlock()
+	if spyCount > 0 {
+		log.Printf("[Broker] Delivered message %s to %d spies on topic '%s'\n", msg.ID, spyCount, t.Name)
+	}
 
+	// Notificar a spies de wildcards
 	for _, wildcardT := range matchingWildcards {
 		wildcardT.mu.Lock()
+		spyCountW := len(wildcardT.spies)
 		for _, spy := range wildcardT.spies {
 			select {
 			case spy <- msg:
 			default:
-				log.Printf("[WS/SSE] Spy buffer full for topic '%s', message %s dropped\n", wildcardT.Name, msg.ID)
+				log.Printf("[Broker] Spy buffer full for topic '%s', message %s dropped\n", wildcardT.Name, msg.ID)
 			}
 		}
 		wildcardT.mu.Unlock()
+		if spyCountW > 0 {
+			log.Printf("[Broker] Delivered message %s to %d spies on wildcard topic '%s'\n", msg.ID, spyCountW, wildcardT.Name)
+		}
 	}
 
 	if isBroadcast {
 		var broadcastChannels []chan message.Message
-
 		for _, wildcardT := range matchingWildcards {
 			wildcardT.mu.Lock()
 			broadcastChannels = append(broadcastChannels, wildcardT.waitingConsumers...)
 			wildcardT.waitingConsumers = nil
 			wildcardT.mu.Unlock()
 		}
-
 		t.mu.Lock()
 		broadcastChannels = append(broadcastChannels, t.waitingConsumers...)
 		t.waitingConsumers = nil
@@ -342,7 +357,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 				ch <- m
 			}
 		}(broadcastChannels, msg)
-
 		return nil
 	}
 
@@ -353,6 +367,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		return errors.New("topic was concurrently deleted")
 	}
 
+	// Intentar entregar a un consumidor esperando (long-polling)
 	for _, wildcardT := range matchingWildcards {
 		wildcardT.mu.Lock()
 		if len(wildcardT.waitingConsumers) > 0 {
@@ -361,6 +376,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			wildcardT.waitingConsumers = wildcardT.waitingConsumers[1:]
 			wildcardT.mu.Unlock()
 			consumerChan <- msg
+			log.Printf("[Broker] Delivered message %s to waiting consumer on wildcard topic '%s'\n", msg.ID, wildcardT.Name)
 			return nil
 		}
 		wildcardT.mu.Unlock()
@@ -371,9 +387,11 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		t.waitingConsumers[0] = nil
 		t.waitingConsumers = t.waitingConsumers[1:]
 		consumerChan <- msg
+		log.Printf("[Broker] Delivered message %s to waiting consumer on topic '%s'\n", msg.ID, t.Name)
 		return nil
 	}
 
+	// Almacenar en cola según prioridad
 	var targetQueue *[]message.Message
 	switch priority {
 	case "high":
@@ -384,11 +402,9 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		targetQueue = &t.Messages // normal
 	}
 
-	// Validación de políticas de RingBuffer
 	totalActiveMessages := len(t.HighMessages) + len(t.Messages) + len(t.LowMessages)
 	if totalActiveMessages >= getMaxMessages() {
 		if t.Policy == "drop-oldest" {
-			// Sacamos el mensaje más viejo evaluando las colas en cascada (low -> normal -> high)
 			var oldestMsg message.Message
 			if len(t.LowMessages) > 0 {
 				oldestMsg = t.LowMessages[0]
@@ -400,51 +416,47 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 				oldestMsg = t.HighMessages[0]
 				t.HighMessages = t.HighMessages[1:]
 			}
-
 			if b.storage != nil {
-				if err := b.storage.AppendAck(topicName, oldestMsg.ID); err != nil {
-					log.Printf("Eviction ACK logging failed: %v\n", err)
-				}
+				b.storage.AppendAck(topicName, oldestMsg.ID)
 			}
 			log.Printf("[RingBuffer] Queue '%s' full. Evicted oldest message: %s\n", topicName, oldestMsg.ID)
 		} else {
 			return errors.New("queue capacity reached (max 100,000 messages)")
 		}
 	}
-
 	*targetQueue = append(*targetQueue, msg)
-
+	log.Printf("[Broker] Message %s enqueued on topic '%s' (priority: %s)\n", msg.ID, t.Name, priority)
 	return nil
 }
 
 func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
 	var results []message.Message
-	var keep []message.Message
-
 	now := time.Now()
 
-	for _, msg := range t.Messages {
-		if len(results) >= limit {
-			keep = append(keep, msg)
-			continue
-		}
-
-		if msg.ExpiresAt != nil && now.After(*msg.ExpiresAt) {
-			if b.storage != nil {
-				b.storage.AppendAck(t.Name, msg.ID)
+	for _, queue := range []*[]message.Message{&t.HighMessages, &t.Messages, &t.LowMessages} {
+		var keep []message.Message
+		for _, msg := range *queue {
+			if len(results) >= limit {
+				keep = append(keep, msg)
+				continue
 			}
-			continue
+			if msg.ExpiresAt != nil && now.After(*msg.ExpiresAt) {
+				if b.storage != nil {
+					b.storage.AppendAck(t.Name, msg.ID)
+				}
+				continue
+			}
+			if msg.DeliverAt != nil && now.Before(*msg.DeliverAt) {
+				keep = append(keep, msg)
+				continue
+			}
+			results = append(results, msg)
 		}
-
-		if msg.DeliverAt != nil && now.Before(*msg.DeliverAt) {
-			keep = append(keep, msg)
-			continue
+		*queue = keep
+		if len(results) >= limit {
+			break
 		}
-
-		results = append(results, msg)
 	}
-
-	t.Messages = keep
 	return results
 }
 
@@ -453,11 +465,11 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 		return nil, false
 	}
 
-	b.mu.Lock()
 	var reg *regexp.Regexp
 	var matchingTopics []*Topic
 
 	if strings.Contains(topicName, "*") {
+		b.mu.RLock()
 		var exists bool
 		reg, exists = b.compiledRegex[topicName]
 		if !exists {
@@ -468,7 +480,6 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 				b.compiledRegex[topicName] = reg
 			}
 		}
-
 		if reg != nil {
 			for name, t := range b.Topics {
 				if reg.MatchString(name) {
@@ -476,27 +487,18 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 				}
 			}
 		}
+		b.mu.RUnlock()
 	}
 
-	if _, exists := b.Topics[topicName]; !exists {
-		if len(b.Topics) >= getMaxTopics() {
-			b.mu.Unlock()
-			return nil, false
-		}
-		t := &Topic{Name: topicName}
-		b.Topics[topicName] = t
-		if strings.Contains(topicName, "*") {
-			b.wildcards[topicName] = t
-		}
+	targetTopic := b.getOrCreateTopic(topicName)
+	if targetTopic == nil {
+		return nil, false
 	}
-	targetTopic := b.Topics[topicName]
-	b.mu.Unlock()
 
 	for _, t := range matchingTopics {
 		t.mu.Lock()
 		results := b.extractMessages(t, limit)
 		t.mu.Unlock()
-
 		if len(results) > 0 {
 			return results, true
 		}
@@ -504,7 +506,6 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 
 	targetTopic.mu.Lock()
 	defer targetTopic.mu.Unlock()
-
 	results := b.extractMessages(targetTopic, limit)
 	if len(results) > 0 {
 		return results, true
@@ -520,7 +521,6 @@ func (b *Broker) GetStats() ([]TopicStat, int) {
 	for k, v := range b.Topics {
 		topicsCopy[k] = v
 	}
-
 	webhooksCopy := make(map[string][]string, len(b.webhooks))
 	for k, v := range b.webhooks {
 		var urls []string
@@ -539,12 +539,10 @@ func (b *Broker) GetStats() ([]TopicStat, int) {
 	stats := make([]TopicStat, 0, len(topicsCopy))
 	for name, t := range topicsCopy {
 		_, hasWebhook := webhooksCopy[name]
-
 		t.mu.Lock()
 		msgCount := len(t.Messages) + len(t.HighMessages) + len(t.LowMessages)
 		consumerCount := len(t.waitingConsumers)
 		t.mu.Unlock()
-
 		stats = append(stats, TopicStat{
 			Name:             name,
 			MessageCount:     msgCount,
@@ -553,7 +551,6 @@ func (b *Broker) GetStats() ([]TopicStat, int) {
 			HasWebhooks:      hasWebhook,
 		})
 	}
-
 	return stats, totalWebhooks
 }
 
@@ -564,7 +561,6 @@ func (b *Broker) RemoveWaitingConsumer(topicName string, notifyChan chan message
 	if !exists {
 		return
 	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i, ch := range t.waitingConsumers {
@@ -580,11 +576,9 @@ func (b *Broker) Ack(topicName string, msgID string) bool {
 	b.mu.RLock()
 	t, exists := b.Topics[topicName]
 	b.mu.RUnlock()
-
 	if !exists {
 		return false
 	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -595,25 +589,19 @@ func (b *Broker) Ack(topicName string, msgID string) bool {
 			break
 		}
 	}
-
 	if foundIndex != -1 {
 		t.Messages[foundIndex] = message.Message{}
 		t.Messages = append(t.Messages[:foundIndex], t.Messages[foundIndex+1:]...)
-
 		if b.storage != nil {
-			if err := b.storage.AppendAck(topicName, msgID); err != nil {
-				log.Printf("Error persisting ACK record: %v\n", err)
-			}
+			b.storage.AppendAck(topicName, msgID)
 		}
 		return true
 	}
-
 	return false
 }
 
 func (b *Broker) Requeue(msg message.Message) {
 	msg.RetryCount++
-
 	targetTopic := msg.Topic
 	if msg.RetryCount >= 3 {
 		targetTopic = msg.Topic + ".dlq"
@@ -621,26 +609,18 @@ func (b *Broker) Requeue(msg message.Message) {
 		log.Printf("Message %s moved to DLQ: %s\n", msg.ID, targetTopic)
 	}
 
-	b.mu.Lock()
-	if _, exists := b.Topics[targetTopic]; !exists {
-		t := &Topic{Name: targetTopic}
-		b.Topics[targetTopic] = t
-		if strings.Contains(targetTopic, "*") {
-			b.wildcards[targetTopic] = t
-		}
+	t := b.getOrCreateTopic(targetTopic)
+	if t == nil {
+		log.Printf("[Broker] Requeue failed: max topics limit reached for %s\n", targetTopic)
+		return
 	}
-	t := b.Topics[targetTopic]
-	b.mu.Unlock()
 
 	if b.storage != nil {
-		if err := b.storage.AppendPut(targetTopic, msg); err != nil {
-			log.Printf("Error persisting requeue record: %v\n", err)
-		}
+		b.storage.AppendPut(targetTopic, msg)
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	if len(t.waitingConsumers) > 0 {
 		consumerChan := t.waitingConsumers[0]
 		t.waitingConsumers[0] = nil
@@ -648,25 +628,21 @@ func (b *Broker) Requeue(msg message.Message) {
 		consumerChan <- msg
 		return
 	}
-
 	if len(t.Messages) >= getMaxMessages() {
 		log.Printf("[Broker] Requeue rejected for topic '%s': capacity reached\n", targetTopic)
 		return
 	}
-
 	t.Messages = append(t.Messages, msg)
 }
 
 func (b *Broker) RegisterWebhook(topicName string, callbackURL string, secret string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
 	for _, wh := range b.webhooks[topicName] {
 		if wh.URL == callbackURL {
 			return errors.New("webhook already registered for this topic")
 		}
 	}
-
 	b.webhooks[topicName] = append(b.webhooks[topicName], WebhookConfig{
 		URL:    callbackURL,
 		Secret: secret,
@@ -681,10 +657,8 @@ func (b *Broker) CreateTopic(topicName string, policy string, retention time.Dur
 	if !validTopicRegex.MatchString(topicName) {
 		return errors.New("The name can only contain letters, numbers, '.', '-' and '_'")
 	}
-
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
 	if len(b.Topics) >= getMaxTopics() {
 		return errors.New("broker maximum topic limit reached")
 	}
@@ -694,13 +668,11 @@ func (b *Broker) CreateTopic(topicName string, policy string, retention time.Dur
 	if policy != "drop-oldest" {
 		policy = "reject"
 	}
-
 	t := &Topic{Name: topicName, Policy: policy, Retention: retention}
 	b.Topics[topicName] = t
 	if strings.Contains(topicName, "*") {
 		b.wildcards[topicName] = t
 	}
-
 	log.Printf("Created Topic '%s' manually via API/Dashboard with policy '%s'\n", topicName, policy)
 	return nil
 }
@@ -709,19 +681,15 @@ func (b *Broker) Peek(topicName string, limit int) []message.Message {
 	b.mu.RLock()
 	t, exists := b.Topics[topicName]
 	b.mu.RUnlock()
-
 	if !exists {
 		return nil
 	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	count := limit
 	if len(t.Messages) < count {
 		count = len(t.Messages)
 	}
-
 	results := make([]message.Message, count)
 	copy(results, t.Messages[:count])
 	return results
@@ -745,15 +713,14 @@ func (b *Broker) Purge(topicName string) error {
 	b.mu.RLock()
 	t, exists := b.Topics[topicName]
 	b.mu.RUnlock()
-
 	if !exists {
 		return errors.New("queue not found")
 	}
-
 	t.mu.Lock()
 	t.Messages = nil
+	t.HighMessages = nil
+	t.LowMessages = nil
 	t.mu.Unlock()
-
 	if b.storage != nil {
 		b.storage.ClearLog(topicName)
 	}
@@ -768,17 +735,14 @@ func (b *Broker) DeleteTopic(topicName string) error {
 		b.mu.Unlock()
 		return errors.New("queue not found")
 	}
-
 	t.mu.Lock()
 	t.Deleted = true
 	t.mu.Unlock()
-
 	delete(b.Topics, topicName)
 	delete(b.wildcards, topicName)
 	delete(b.webhooks, topicName)
 	delete(b.compiledRegex, topicName)
 	b.mu.Unlock()
-
 	if b.storage != nil {
 		b.storage.DeleteLog(topicName)
 	}
@@ -789,9 +753,7 @@ func (b *Broker) DeleteTopic(topicName string) error {
 func (b *Broker) GetWebhooks(topicName string) []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-
 	configs := b.webhooks[topicName]
-
 	result := make([]string, 0, len(configs))
 	for _, wh := range configs {
 		result = append(result, wh.URL)
@@ -803,18 +765,14 @@ func (b *Broker) IsIdempotent(key string) bool {
 	if key == "" {
 		return false
 	}
-
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
 	now := time.Now()
-
 	if exp, exists := b.idempotencyKeys[key]; exists {
 		if now.Before(exp) {
 			return true
 		}
 	}
-
 	if len(b.idempotencyKeys) > 5000 {
 		for k, v := range b.idempotencyKeys {
 			if now.After(v) {
@@ -822,12 +780,10 @@ func (b *Broker) IsIdempotent(key string) bool {
 			}
 		}
 	}
-
 	const maxIdempotencyKeys = 20000
 	if len(b.idempotencyKeys) >= maxIdempotencyKeys {
 		return false
 	}
-
 	b.idempotencyKeys[key] = now.Add(5 * time.Minute)
 	return false
 }
@@ -836,27 +792,15 @@ func (b *Broker) AddSpy(topicName string) (chan message.Message, error) {
 	if !b.IsValidTopicName(topicName) {
 		return nil, errors.New("invalid topic name")
 	}
-
-	b.mu.Lock()
-	t, exists := b.Topics[topicName]
-	if !exists {
-		if len(b.Topics) >= getMaxTopics() {
-			b.mu.Unlock()
-			return nil, errors.New("broker maximum topic limit reached")
-		}
-		t = &Topic{Name: topicName}
-		b.Topics[topicName] = t
-		if strings.Contains(topicName, "*") {
-			b.wildcards[topicName] = t
-		}
+	t := b.getOrCreateTopic(topicName)
+	if t == nil {
+		return nil, errors.New("broker maximum topic limit reached")
 	}
-	b.mu.Unlock()
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	ch := make(chan message.Message, 50)
 	t.spies = append(t.spies, ch)
+	log.Printf("[Broker] Added spy on topic '%s' (total spies: %d)\n", topicName, len(t.spies))
 	return ch, nil
 }
 
@@ -867,13 +811,13 @@ func (b *Broker) RemoveSpy(topicName string, ch chan message.Message) {
 	if !exists {
 		return
 	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i, spy := range t.spies {
 		if spy == ch {
 			t.spies = append(t.spies[:i], t.spies[i+1:]...)
 			close(ch)
+			log.Printf("[Broker] Removed spy from topic '%s' (remaining spies: %d)\n", topicName, len(t.spies))
 			break
 		}
 	}
@@ -883,37 +827,24 @@ func (b *Broker) CreateGroup(topicName, groupName string) (string, error) {
 	if !validTopicRegex.MatchString(groupName) {
 		return "", errors.New("invalid group name format")
 	}
-
 	virtualName := fmt.Sprintf("%s::%s", topicName, groupName)
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	if b.bindings[topicName] == nil {
 		b.bindings[topicName] = make(map[string]bool)
 	}
 	b.bindings[topicName][virtualName] = true
+	b.mu.Unlock()
 
-	if _, exists := b.Topics[virtualName]; !exists {
-		if len(b.Topics) >= getMaxTopics() {
-			return "", errors.New("broker maximum topic limit reached")
-		}
-
-		policy := os.Getenv("TINYMQ_DEFAULT_POLICY")
-		if policy != "drop-oldest" {
-			policy = "reject"
-		}
-		t := &Topic{Name: virtualName, Policy: policy}
-		b.Topics[virtualName] = t
-		if strings.Contains(virtualName, "*") {
-			b.wildcards[virtualName] = t
-		}
+	// Crear el virtual topic si no existe
+	t := b.getOrCreateTopic(virtualName)
+	if t == nil {
+		return "", errors.New("broker maximum topic limit reached")
 	}
 
 	if b.OnGroupCreate != nil {
 		b.OnGroupCreate(topicName, groupName)
 	}
-
 	return virtualName, nil
 }
 

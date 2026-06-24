@@ -61,6 +61,8 @@ You can interact with TinyMQ via `curl`, Go, Python, Node.js, Rust, etc. Payload
 - `Idempotency-Key`: A unique string. If a network retry occurs within 5 minutes with the same key, the broker safely ignores the duplicate.
 - `X-MQ-*`: Custom user-defined metadata headers. Any header starting with `X-MQ-` (e.g., `X-MQ-Correlation-Id`, `X-MQ-Source`) is stored with the message and returned on consume. Use these to pass routing metadata without modifying your payload schema.
 
+> Note: The `{topic}` parameter can include forward slashes (/) to create hierarchical topics. The broker will preserve the full path (e.g., /publish/orders/eu will publish to topic orders/eu).
+
 ```bash
 curl -X POST "http://127.0.0.1:7800/publish/orders.eu?delay=5s" \
   -H "Content-Type: application/json" \
@@ -560,7 +562,7 @@ To monitor cluster consensus health in real-time, inspect the application loggin
 To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
 - **Max Payload Size:** `2 MB` per HTTP request. Exceeding this limit will safely abort the connection and return an `HTTP 413 Request Entity Too Large` error.
 - **Max Queue Capacity:** Configurable via `TINYMQ_MAX_MESSAGES` (Default: `100,000`). Controls the memory footprint per topic. When exceeded, the broker follows the `TINYMQ_DEFAULT_POLICY` (reject or drop-oldest).
-- **Topic & Group Validation:** To prevent Path Traversal injections, all topic and consumer group names are strictly validated against the `^[a-zA-Z0-9._:-]+$` regex. The underlying disk engine also actively blocks any paths containing `..`, `/`, or `\`.
+- **"Topic & Group Validation:** To prevent Path Traversal injections, all topic and consumer group names are strictly validated against the `^[a-zA-Z0-9._:\-/]+$` regex. The forward slash (`/`) is allowed to enable hierarchical topic structures (`e.g., orders/eu, sensors/temperature`)."
 - **Max Active Topics:** Configurable via `TINYMQ_MAX_TOPICS` (Default: `10,000`). Prevents Denial of Service (DoS) attacks that attempt to exhaust server RAM by dynamically generating millions of unique topic names. If the limit is reached, topic creation requests are safely rejected.
 
 > **Note on 503 Service Unavailable:** If the cluster is experiencing a split-brain, leader election, or the Leader node is unreachable, write-operations (`POST`, `DELETE`) on follower nodes will safely reject the request with a `503` status code to prevent data divergence.

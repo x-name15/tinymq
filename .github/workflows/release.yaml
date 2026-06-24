@@ -79,6 +79,12 @@ jobs:
           tar -czf dist/tinymq-${VERSION}-linux-amd64.tar.gz tinymq tmq
           rm tinymq tmq
 
+          # Linux ARM64 (Tar.gz Bundle)
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
+          tar -czf dist/tinymq-${VERSION}-linux-arm64.tar.gz tinymq tmq
+          rm tinymq tmq
+
           # macOS Intel (Tar.gz Bundle)
           CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
           CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o tmq ./cmd/tmq
@@ -114,10 +120,11 @@ jobs:
             |-------------------|------------------|
             | **Windows (x64)** | `tinymq-${{ steps.version.outputs.version }}-windows-amd64.zip` |
             | **Linux (x64)** | `tinymq-${{ steps.version.outputs.version }}-linux-amd64.tar.gz` |
+            | **Linux (ARM64)** | `tinymq-${{ steps.version.outputs.version }}-linux-arm64.tar.gz` |
             | **macOS (Intel)** | `tinymq-${{ steps.version.outputs.version }}-darwin-amd64.tar.gz` |
             | **macOS (Apple Silicon)** | `tinymq-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz` |
             
-            **Docker Images:**
+            **Docker Images (multi‑arch: amd64 + arm64):**
             - **GHCR:** `docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}`
             - **Docker Hub:** `docker pull flez71/tinymq:${{ steps.version.outputs.version }}`
             
@@ -138,12 +145,11 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Build and push Docker images
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:latest

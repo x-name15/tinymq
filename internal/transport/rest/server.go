@@ -211,18 +211,30 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // --- Handlers ---
 
+// extractTopicFromPath extrae el topic de la URL eliminando el prefijo dado.
+// Ejemplo: prefix="/publish/", path="/publish/foo/bar" -> "foo/bar"
+func extractTopicFromPath(r *http.Request, prefix string) string {
+	path := r.URL.Path
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	topic := strings.TrimPrefix(path, prefix)
+	// Eliminar posibles trailing slash
+	topic = strings.TrimSuffix(topic, "/")
+	return topic
+}
+
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) < 3 || parts[2] == "" {
+	topic := extractTopicFromPath(r, "/publish/")
+	if topic == "" {
 		http.Error(w, "Topic is required. Usage: POST /publish/{topic}", http.StatusBadRequest)
 		return
 	}
-	topic := parts[2]
 
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	body, err := io.ReadAll(r.Body)
@@ -301,12 +313,11 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) < 3 || parts[2] == "" {
+	topic := extractTopicFromPath(r, "/consume/")
+	if topic == "" {
 		http.Error(w, "Topic is required", http.StatusBadRequest)
 		return
 	}
-	topic := parts[2]
 
 	limit := 1
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
@@ -363,7 +374,6 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// [Feature 2]: Distinción estricta entre 404 (Topic no existe) y 204 (Topic existe pero vacío)
 	if !ok || len(msgs) == 0 {
 		if !s.broker.TopicExists(topic) {
 			w.Header().Set("Content-Type", "application/json")
@@ -381,18 +391,21 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Llamada al formateador de Quality of Life
 	s.respondWithQoL(w, msgs, limit)
 }
 
 func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) < 4 || parts[2] == "" || parts[3] == "" {
+	// Extraer topic y msgID de /ack/{topic}/{msgID}
+	path := strings.TrimPrefix(r.URL.Path, "/ack/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		http.Error(w, "Topic and Message ID required", http.StatusBadRequest)
 		return
 	}
+	topic := parts[0]
+	msgID := parts[1]
 
-	if !s.broker.Ack(parts[2], parts[3]) {
+	if !s.broker.Ack(topic, msgID) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(`{"status": "error", "message": "Message not found"}`))
@@ -429,14 +442,15 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) < 3 || parts[2] == "" {
+	topic := extractTopicFromPath(r, "/webhook/")
+	if topic == "" {
 		http.Error(w, "Topic required", http.StatusBadRequest)
 		return
 	}
 
 	var payload struct {
-		URL string `json:"url"`
+		URL    string `json:"url"`
+		Secret string `json:"secret,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.URL == "" {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -449,7 +463,7 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.broker.RegisterWebhook(parts[2], payload.URL, "")
+	s.broker.RegisterWebhook(topic, payload.URL, payload.Secret)
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte(`{"status": "webhook_registered"}`))
 }
@@ -541,12 +555,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) < 3 || parts[2] == "" {
+	topic := extractTopicFromPath(r, "/stream/")
+	if topic == "" {
 		http.Error(w, "Topic required", http.StatusBadRequest)
 		return
 	}
-	topic := parts[2]
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -738,7 +751,6 @@ func (s *Server) respondWithQoL(w http.ResponseWriter, msgs []message.Message, l
 	var batchRes []QoLMessageResponse
 	for _, m := range msgs {
 		qol := QoLMessageResponse{Message: m, PayloadEncoding: "base64"}
-
 		if utf8.Valid(m.Payload) {
 			qol.PayloadText = string(m.Payload)
 		}

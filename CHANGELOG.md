@@ -3,6 +3,25 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.8.2] - 2026-06-24 — Cigarettes After Fixes (bcs of the test files)
+
+### Added
+- **Multi‑architecture Docker Images:** The official Docker image now supports both `linux/amd64` and `linux/arm64` platforms, enabling native execution on Raspberry Pi, AWS Graviton, and other ARM64 environments.
+- **Linux ARM64 Binary Bundle:** Added a pre‑compiled `tinymq-<version>-linux-arm64.tar.gz` asset to the GitHub Release for direct download.
+
+### Fixed
+- **REST Topic Path Handling:** Endpoints like `/publish/foo/bar` now correctly preserve the full topic path (`foo/bar`) instead of truncating at the first slash. This allows hierarchical topic names with `/` in all REST routes (`/publish/`, `/consume/`, `/ack/`, `/webhook/`, `/stream/`).
+- **Priority Queue Consume:** `extractMessages` was only reading `t.Messages` (normal priority), silently ignoring `HighMessages` and `LowMessages`. Fixed to drain high → normal → low in order.
+- **MQTT Deadline Reset:** The MQTT gateway now resets the connection deadline on each iteration, preventing premature closure when clients send packets with slight delays.
+
+### Tests
+- **Integration Tests:** Expanded test coverage for scenarios involving hierarchical topic names (`/`) and cross‑protocol flows (MQTT → HTTP, HTTP → WebSocket). All integration tests now pass reliably.
+
+### CI/CD
+- **ARM64 Cross‑compilation:** Added a CI step to verify that the broker compiles successfully for the `linux/arm64` platform, ensuring compatibility with ARM devices.
+- **Release Pipeline:** Updated GitHub Actions workflow to build and publish Docker images for both `amd64` and `arm64`, and to include Linux ARM64 binary bundles in releases.
+
+---
 ## [2.8.1] - 2026-06-24 — The "QoL for U" Update
 
 ### Added

@@ -34,13 +34,19 @@ jobs:
     - name: Run Tests (Race Detector)
       run: go test -race -timeout 30s ./...
 
-    - name: Build TinyMQ Binary
+    - name: Build TinyMQ Binary (AMD64)
       run: CGO_ENABLED=0 go build -ldflags="-s -w" -o tinymq ./cmd/tinymq
       
-    - name: Build CLI Binary
+    - name: Build CLI Binary (AMD64)
       run: CGO_ENABLED=0 go build -ldflags="-s -w" -o tmq ./cmd/tmq
-    
-    - name: Verify Docker Image Size
+
+    - name: Build ARM64 Binary (Cross‑compile)
+      run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o tinymq-arm64 ./cmd/tinymq
+
+    - name: Verify ARM64 Binary
+      run: file tinymq-arm64 | grep "ARM aarch64"
+
+    - name: Verify Docker Image Size (AMD64)
       run: |
         echo "Building Docker image for size verification..."
         docker build -t tinymq:ci-check .
@@ -63,5 +69,5 @@ jobs:
         
         echo "SUCCESS: Image size is within the allowed limits."
 
-    - name: Docker Build Check
+    - name: Docker Build Check (AMD64)
       run: docker build -t tinymq:test .

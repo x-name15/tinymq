@@ -94,10 +94,11 @@ func (s *Server) handleClient(conn net.Conn) {
 		log.Printf("[MQTT] (-) TCP Connection closed for %s", addr)
 	}()
 
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
-
 	header := make([]byte, 1)
 	for {
+		// Reiniciar el deadline en cada iteración para evitar cierre prematuro
+		conn.SetDeadline(time.Now().Add(30 * time.Second))
+
 		if _, err := io.ReadFull(conn, header); err != nil {
 			if err != io.EOF {
 				log.Printf("[MQTT] Read error from %s: %v", addr, err)
@@ -252,11 +253,13 @@ func (s *Server) handlePublish(mc *mqttConn, flags byte, payload []byte) error {
 	}
 
 	msgPayload := payload[offset:]
+	log.Printf("[MQTT] Received PUBLISH on topic '%s' with %d bytes", topic, len(msgPayload))
 
 	if err := s.broker.Publish(topic, msgPayload, nil, "normal", nil, nil, false); err != nil {
-		log.Printf("[MQTT] Failed to publish to broker: %v", err)
+		log.Printf("[MQTT] Broker rejected publish: %v", err)
 		return err
 	}
+	log.Printf("[MQTT] Publish accepted by broker for topic '%s'", topic)
 
 	if qos == 1 {
 		response := make([]byte, 4)
@@ -304,7 +307,6 @@ func (s *Server) handleSubscribe(mc *mqttConn, payload []byte, spies map[string]
 		offset++
 
 		cleanTopic := translateMQTTWildcard(topic)
-
 		log.Printf("[MQTT] Client subscribing to '%s' (QoS: %d, translated to '%s')", topic, requestedQoS, cleanTopic)
 
 		spyChan, err := s.broker.AddSpy(cleanTopic)
