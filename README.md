@@ -1,5 +1,5 @@
 # 🍃 TinyMQ
-[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat-square&logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go)](https://go.dev/)
 [![Go Report Card](https://goreportcard.com/badge/github.com/x-name15/tinymq?style=flat-square)](https://goreportcard.com/report/github.com/x-name15/tinymq)
 [![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg?style=flat-square)](LICENSE)
 [![Latest Release](https://img.shields.io/badge/Release-v2.8.1-green?style=flat-square)](https://github.com/x-name15/tinymq/releases)
@@ -110,7 +110,7 @@ docker run -d \
   flez71/tinymq:latest
 ```
 
-### Or using Docker Compose (For building from source)
+### Or using Docker Compose
 
 ```bash
 git clone https://github.com/x-name15/tinymq.git
