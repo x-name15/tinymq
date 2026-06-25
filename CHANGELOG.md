@@ -3,6 +3,24 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.8.4] - 2026-06-24 — Damn Dude, More Fixes
+
+### Fixed
+
+- **Memory Leak in `Ack()`:** Resolved a permanent memory leak where acknowledged messages were not always released. `Ack()` now correctly searches and removes messages from `HighMessages`, `Messages`, and `LowMessages`.
+- **Leader HTTP Routing:** Fixed `GetLeaderHTTP()` to build leader URLs using `TINYMQ_CLUSTER_HTTP_ADVERTISE` instead of generating invalid IP-based addresses, restoring proxy functionality.
+- **Quorum Cache Race Condition:** Eliminated a data race in `calculateQuorum()` by protecting quorum cache access with a mutex.
+- **State Synchronization Security:** All `REPLICATE` commands sent during `SYNC_REQ` are now signed with HMAC-SHA256, preventing unauthorized state injection during cluster synchronization.
+- **Consumer Group Replication Consistency:** `ReplicateBinding` now waits for follower acknowledgments (quorum) before confirming Consumer Group creation, preventing cluster desynchronization.
+- **Priority Queue Visibility:** Fixed `Peek()` and `GetStateSnapshot()` so they correctly include high- and low-priority messages, ensuring dashboards and synchronized nodes receive a complete broker state view.
+- **Topic Cleanup:** `DeleteTopic()` now properly removes orphaned Consumer Group bindings when topics are deleted.
+- **REST Header Sanitization:** Added validation and sanitization for `X-MQ-*` headers to mitigate header injection and excessive memory allocation attacks.
+- **Large WAL Recovery:** Increased the `bufio.Scanner` buffer in `LoadMessages()` to 4 MB, preventing large messages from being skipped during WAL recovery.
+- **Cluster ACK Handling:** Added missing ACK responses for `BIND_GROUP` operations to improve replication reliability.
+- **Election Timer Efficiency:** Optimized timer management inside `electionTimeoutLoop`, reducing unnecessary allocations and timer churn during leader elections.
+- **Integration Test Reliability:** Reworked integration tests to use dynamic ports (`:0`) and adjusted timeouts, eliminating port collisions and significantly reducing flakiness under heavy CI load.
+
+---
 ## [2.8.3] - 2026-06-24 — Benchmarks and Fixes
 
 ### Added

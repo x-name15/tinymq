@@ -260,9 +260,13 @@ func (n *Node) handlePeer(conn net.Conn) {
 				for _, msg := range messages {
 					payloadB64 := base64.StdEncoding.EncodeToString(msg.Payload)
 					body := fmt.Sprintf("REPLICATE %d %s %s", term, msg.Topic, payloadB64)
-					conn.Write([]byte(body + "\n"))
+					mac := n.signMessage(body)
+					conn.Write([]byte(fmt.Sprintf("%s %s\n", body, mac)))
 				}
-				conn.Write([]byte("SYNC_COMPLETE\n"))
+
+				syncCompleteBody := "SYNC_COMPLETE"
+				syncCompleteMac := n.signMessage(syncCompleteBody)
+				conn.Write([]byte(fmt.Sprintf("%s %s\n", syncCompleteBody, syncCompleteMac)))
 			}
 
 		case "REQUEST_VOTE":
@@ -275,7 +279,9 @@ func (n *Node) handlePeer(conn net.Conn) {
 
 			allowed := n.evaluateVote(candidateTerm, candidateAddr)
 			if allowed {
-				fmt.Fprintf(conn, "VOTE_GRANTED %d\n", n.CurrentTerm)
+				voteBody := fmt.Sprintf("VOTE_GRANTED %d", n.CurrentTerm)
+				voteMac := n.signMessage(voteBody)
+				fmt.Fprintf(conn, "%s %s\n", voteBody, voteMac)
 			} else {
 				fmt.Fprintf(conn, "VOTE_DENIED %d\n", n.CurrentTerm)
 			}
@@ -297,25 +303,39 @@ func (n *Node) handlePeer(conn net.Conn) {
 				_, err := n.broker.CreateGroup(topic, group)
 				if err == nil {
 					log.Printf("[Cluster] Replicated Consumer Group binding: %s -> %s\n", topic, group)
+					conn.Write([]byte("BIND_GROUP_ACK\n"))
+				} else {
+					conn.Write([]byte("BIND_GROUP_ERR\n"))
 				}
+			} else {
+				conn.Write([]byte("BIND_GROUP_DENIED\n"))
 			}
 		}
 	}
 }
 
 func (n *Node) calculateQuorum() int {
+	n.mu.RLock()
 	if n.quorumSize > 0 {
-		return n.quorumSize
+		q := n.quorumSize
+		n.mu.RUnlock()
+		return q
 	}
+	n.mu.RUnlock()
 
 	nodesEnv := os.Getenv("TINYMQ_CLUSTER_NODES")
+	var q int
 	if nodesEnv == "" {
-		n.quorumSize = 1
-		return 1
+		q = 1
+	} else {
+		totalClusterSize := len(strings.Split(nodesEnv, ",")) + 1
+		q = (totalClusterSize / 2) + 1
 	}
-	totalClusterSize := len(strings.Split(nodesEnv, ",")) + 1
-	n.quorumSize = (totalClusterSize / 2) + 1
-	return n.quorumSize
+
+	n.mu.Lock()
+	n.quorumSize = q
+	n.mu.Unlock()
+	return q
 }
 
 func (n *Node) ReplicateBinding(topic string, group string) error {
@@ -330,23 +350,63 @@ func (n *Node) ReplicateBinding(topic string, group string) error {
 	}
 	n.mu.RUnlock()
 
-	if role != Leader || len(peers) == 0 {
+	if role != Leader {
+		return errors.New("HTTP_PROXY_REQUIRED")
+	}
+
+	if len(peers) == 0 {
 		return nil
+	}
+
+	timeoutDuration := 500 * time.Millisecond
+	if tStr := os.Getenv("TINYMQ_CLUSTER_REPLICATE_TIMEOUT"); tStr != "" {
+		if d, err := time.ParseDuration(tStr); err == nil {
+			timeoutDuration = d
+		}
 	}
 
 	body := fmt.Sprintf("BIND_GROUP %d %s %s", term, topic, group)
 	mac := n.signMessage(body)
 	msg := fmt.Sprintf("%s %s\n", body, mac)
 
+	var successCount atomic.Int32
+	successCount.Store(1)
+
+	ackChan := make(chan struct{}, len(peers))
+
 	for _, addr := range peers {
 		go func(target string) {
-			conn, err := net.DialTimeout("tcp", target, 5*time.Second)
-			if err == nil {
-				defer conn.Close()
-				fmt.Fprint(conn, msg)
+			conn, err := net.DialTimeout("tcp", target, timeoutDuration)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			fmt.Fprint(conn, msg)
+			reader := bufio.NewReader(conn)
+			conn.SetReadDeadline(time.Now().Add(timeoutDuration))
+			resp, _ := reader.ReadString('\n')
+
+			if strings.TrimSpace(resp) == "BIND_GROUP_ACK" {
+				successCount.Add(1)
+				ackChan <- struct{}{}
 			}
 		}(addr)
 	}
+
+	quorum := n.calculateQuorum()
+	timeoutTimer := time.NewTimer(timeoutDuration)
+	defer timeoutTimer.Stop()
+
+	for successCount.Load() < int32(quorum) {
+		select {
+		case <-ackChan:
+		case <-timeoutTimer.C:
+			return fmt.Errorf("binding quorum timeout: %d/%d ACKs received within %v", successCount.Load(), len(n.Peers)+1, timeoutDuration)
+		}
+	}
+
+	log.Printf("[Cluster] Consumer Group Binding replicated to %d nodes (Quorum OK)\n", successCount.Load())
 	return nil
 }
 
@@ -587,13 +647,28 @@ func (n *Node) requestSync(leaderAddr string) {
 			return
 		}
 		line = strings.TrimSpace(line)
-		if line == "SYNC_COMPLETE" {
+		parts := strings.Split(line, " ")
+		if len(parts) == 0 || parts[0] == "" {
+			continue
+		}
+
+		receivedMac := parts[len(parts)-1]
+		msgBody := strings.Join(parts[:len(parts)-1], " ")
+
+		if !n.verifyMessage(msgBody, receivedMac) {
+			log.Printf("[Cluster] SEC-ALERT: Invalid HMAC signature in SYNC response stream, skipping packet safely.")
+			continue
+		}
+
+		parts = parts[:len(parts)-1]
+		cmd := parts[0]
+
+		if cmd == "SYNC_COMPLETE" {
 			log.Println("[Cluster] State synchronization complete.")
 			return
 		}
 
-		parts := strings.Split(line, " ")
-		if len(parts) >= 4 && parts[0] == "REPLICATE" {
+		if len(parts) >= 4 && cmd == "REPLICATE" {
 			topic := parts[2]
 			payloadB64 := parts[3]
 			if payload, err := base64.StdEncoding.DecodeString(payloadB64); err == nil {
@@ -613,11 +688,17 @@ func (n *Node) GetLeaderHTTP() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	if n.Role == Leader {
+		advertise := os.Getenv("TINYMQ_CLUSTER_HTTP_ADVERTISE")
+		if advertise != "" {
+			if !strings.Contains(advertise, ":") {
+				return advertise + ":" + n.HttpPort
+			}
+			return advertise
+		}
 		return "127.0.0.1:" + n.HttpPort
 	}
-	if n.VotedFor != "" && n.LeaderHttp != "" {
-		host, _, _ := net.SplitHostPort(n.VotedFor)
-		return host + ":" + n.LeaderHttp
+	if n.LeaderHttp != "" {
+		return n.LeaderHttp
 	}
 	return ""
 }

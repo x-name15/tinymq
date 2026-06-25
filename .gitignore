@@ -10,7 +10,10 @@ data/*.log
 #Build
 tinymq.exe
 
-#Repomix
+#Repomix Archives
+.repomix/
+.repomixignore
+repomix.config.json
 repomix-output*.xml
 
 #Local Actions

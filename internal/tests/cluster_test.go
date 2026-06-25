@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,16 +13,28 @@ import (
 	"github.com/x-name15/tinymq/internal/cluster"
 )
 
-// TestIntegrationClusterHMACMismatched verifies from outside the package (black-box)
+func getFreePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("could not bind to a free port: %v", err)
+	}
+	port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	l.Close()
+	return port
+}
+
 func TestIntegrationClusterHMACMismatched(t *testing.T) {
-	// 1. Force a secret in the test environment
 	secret := "integration-secret-key-2026"
 	os.Setenv("TINYMQ_CLUSTER_SECRET", secret)
 	defer os.Unsetenv("TINYMQ_CLUSTER_SECRET")
 
 	b := broker.New(nil)
 
-	n := cluster.NewNode("127.0.0.1:9101", "7811", b)
+	tcpPort := getFreePort(t)
+	httpPort := getFreePort(t)
+
+	n := cluster.NewNode("127.0.0.1:"+tcpPort, httpPort, b)
 	if err := n.Start(); err != nil {
 		t.Fatalf("Failed to start test node: %v", err)
 	}
@@ -29,7 +42,7 @@ func TestIntegrationClusterHMACMismatched(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	conn, err := net.Dial("tcp", "127.0.0.1:9101")
+	conn, err := net.Dial("tcp", "127.0.0.1:"+tcpPort)
 	if err != nil {
 		t.Fatalf("Failed to connect to cluster socket: %v", err)
 	}
@@ -60,7 +73,10 @@ func TestIntegrationConsumerGroupHookReplication(t *testing.T) {
 	defer os.Unsetenv("TINYMQ_CLUSTER_SECRET")
 
 	b := broker.New(nil)
-	n := cluster.NewNode("127.0.0.1:9102", "7812", b)
+
+	tcpPort := getFreePort(t)
+	httpPort := getFreePort(t)
+	n := cluster.NewNode("127.0.0.1:"+tcpPort, httpPort, b)
 
 	hookTriggered := false
 	b.OnGroupCreate = func(topic, group string) error {

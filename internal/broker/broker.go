@@ -598,22 +598,21 @@ func (b *Broker) Ack(topicName string, msgID string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	foundIndex := -1
-	for i, m := range t.Messages {
-		if m.ID == msgID {
-			foundIndex = i
-			break
+	ackFrom := func(queue *[]message.Message) bool {
+		for i, m := range *queue {
+			if m.ID == msgID {
+				(*queue)[i] = message.Message{}
+				*queue = append((*queue)[:i], (*queue)[i+1:]...)
+				if b.storage != nil {
+					b.storage.AppendAck(topicName, msgID)
+				}
+				return true
+			}
 		}
+		return false
 	}
-	if foundIndex != -1 {
-		t.Messages[foundIndex] = message.Message{}
-		t.Messages = append(t.Messages[:foundIndex], t.Messages[foundIndex+1:]...)
-		if b.storage != nil {
-			b.storage.AppendAck(topicName, msgID)
-		}
-		return true
-	}
-	return false
+
+	return ackFrom(&t.HighMessages) || ackFrom(&t.Messages) || ackFrom(&t.LowMessages)
 }
 
 func (b *Broker) Requeue(msg message.Message) {
@@ -703,12 +702,22 @@ func (b *Broker) Peek(topicName string, limit int) []message.Message {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	count := limit
-	if len(t.Messages) < count {
-		count = len(t.Messages)
+
+	var results []message.Message
+
+	appendUpToLimit := func(source []message.Message) {
+		for _, msg := range source {
+			if len(results) >= limit {
+				return
+			}
+			results = append(results, msg)
+		}
 	}
-	results := make([]message.Message, count)
-	copy(results, t.Messages[:count])
+
+	appendUpToLimit(t.HighMessages)
+	appendUpToLimit(t.Messages)
+	appendUpToLimit(t.LowMessages)
+
 	return results
 }
 
@@ -856,7 +865,6 @@ func (b *Broker) CreateGroup(topicName, groupName string) (string, error) {
 	b.bindings[topicName][virtualName] = true
 	b.mu.Unlock()
 
-	// Crear el virtual topic si no existe
 	t := b.getOrCreateTopic(virtualName)
 	if t == nil {
 		return "", errors.New("broker maximum topic limit reached")
@@ -879,8 +887,8 @@ func (b *Broker) GetStateSnapshot() []message.Message {
 	var allMessages []message.Message
 	for _, t := range topics {
 		t.mu.Lock()
-		allMessages = append(allMessages, t.Messages...)
 		allMessages = append(allMessages, t.HighMessages...)
+		allMessages = append(allMessages, t.Messages...)
 		allMessages = append(allMessages, t.LowMessages...)
 		t.mu.Unlock()
 	}

@@ -56,7 +56,7 @@ func setupIntegrationStack(t *testing.T) (b *broker.Broker, restPort string, mqt
 		mqttSrv.Stop()
 	})
 
-	time.Sleep(80 * time.Millisecond)
+	time.Sleep(250 * time.Millisecond)
 
 	return b, restPort, mqttPort
 }
