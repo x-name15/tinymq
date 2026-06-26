@@ -22,6 +22,9 @@ data/
 repomix.config.json
 repomix-output*.xml
 
+# Kubernetes Files
+k8s/
+
 # Ignore local binaries and CLI source (Docker only needs the broker)
 bin/
 cmd/tmq/
