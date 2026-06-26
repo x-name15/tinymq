@@ -1,0 +1,97 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinymq-headless
+  labels:
+    app: tinymq
+spec:
+  clusterIP: None
+  ports:
+    - port: 7800
+      name: http
+    - port: 1883
+      name: mqtt
+    - port: 7901
+      name: cluster
+  selector:
+    app: tinymq
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinymq-service
+spec:
+  selector:
+    app: tinymq
+  ports:
+    - port: 7800
+      targetPort: 7800
+      name: http
+    - port: 7901            
+      targetPort: 7901      
+      name: cluster
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tinymq
+spec:
+  serviceName: "tinymq-headless"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tinymq
+  template:
+    metadata:
+      labels:
+        app: tinymq
+    spec:
+      containers:
+      - name: tinymq
+        image: ghcr.io/x-name15/tinymq:latest
+        ports:
+        - containerPort: 7800
+          name: http
+        - containerPort: 1883
+          name: mqtt
+        - containerPort: 7901
+          name: cluster
+        env:
+        # --- K8s Settings ---
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: TINYMQ_CLUSTER_HTTP_ADVERTISE
+          value: "$(POD_NAME).tinymq-headless:7800"
+        
+        # --- Clustering ---
+        - name: TINYMQ_CLUSTER_ADDR
+          value: "0.0.0.0:7901"
+        - name: TINYMQ_CLUSTER_NODES
+          value: "tinymq-0.tinymq-headless:7901,tinymq-1.tinymq-headless:7901,tinymq-2.tinymq-headless:7901"
+        - name: TINYMQ_CLUSTER_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: tinymq-secrets
+              key: cluster-secret
+        # --- MQTT ---
+        - name: TINYMQ_MQTT_PORT
+          value: "1883"
+        # --- Rate Limiting ---
+        - name: TINYMQ_RATE_LIMIT
+          value: "100"
+        
+        volumeMounts:
+        - name: data-volume
+          mountPath: /home/tinymq/data
+          
+  volumeClaimTemplates:
+  - metadata:
+      name: data-volume
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

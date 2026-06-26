@@ -708,6 +708,21 @@ docker run -d \
 ### NATS gateway settings
 
 - `TINYMQ_NATS_PORT`: TCP port for the NATS-compatible gateway. Set to `4222` (the standard NATS port) to enable. Leave empty to disable (default). When enabled, any NATS client library can connect without a custom SDK.
+---
+
+### Deploying to Kubernetes (Highly Available Cluster)
+
+TinyMQ is fully compatible with Kubernetes. Because TinyMQ uses a Write-Ahead Log (.log) and requires stable network identities to form a cluster, you must use a `StatefulSet` combined with a `Headless Service`.
+
+We provide a ready-to-use manifest that deploys a 3-node cluster with persistent volumes:
+
+1. Apply the manifest:
+   `kubectl apply -f k8s/tinymq-cluster.yaml`
+2. Wait for the pods to initialize and elect a leader:
+   `kubectl get pods -l app=tinymq -w`
+3. Access the cluster by port-forwarding to any node:
+   `kubectl port-forward tinymq-0 7800:7800`
+
 
 ### Persistent data (Docker Compose)
 
