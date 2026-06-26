@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +26,23 @@ type LogRecord struct {
 	Message   *message.Message `json:"message,omitempty"`
 	MessageID string           `json:"message_id,omitempty"`
 	Timestamp time.Time        `json:"timestamp"`
+	Checksum  uint32           `json:"checksum,omitempty"`
+}
+
+func checksumFor(rec LogRecord) uint32 {
+	rec.Checksum = 0
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return 0
+	}
+	return crc32.ChecksumIEEE(b)
+}
+
+func validateRecord(rec LogRecord) bool {
+	if rec.Checksum == 0 {
+		return true
+	}
+	return checksumFor(rec) == rec.Checksum
 }
 
 type DiskStorage struct {
@@ -54,17 +73,29 @@ func isSafePath(topic string) error {
 	return nil
 }
 
+func topicToFilename(topic string) string {
+	safe := strings.ReplaceAll(topic, "/", "_b_")
+	safe = strings.ReplaceAll(safe, "@", "_a_")
+	return safe
+}
+
+func logFilePath(dataDir, topic string) string {
+	return filepath.Join(dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
+}
+
 func (s *DiskStorage) writeRecord(topic string, record LogRecord) error {
 	if err := isSafePath(topic); err != nil {
 		return err
 	}
+
+	record.Checksum = checksumFor(record)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	file, exists := s.activeFiles[topic]
 	if !exists {
-		filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic))) // ← fix
+		filename := logFilePath(s.dataDir, topic)
 		var err error
 		file, err = os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {
@@ -73,13 +104,12 @@ func (s *DiskStorage) writeRecord(topic string, record LogRecord) error {
 		s.activeFiles[topic] = file
 	}
 
-	bytes, err := json.Marshal(record)
+	b, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
 
-	_, err = file.Write(append(bytes, '\n'))
-
+	_, err = file.Write(append(b, '\n'))
 	if s.syncWrites && err == nil {
 		err = file.Sync()
 	}
@@ -111,9 +141,9 @@ func (s *DiskStorage) LoadMessages(topic string) ([]message.Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
-
+	filename := logFilePath(s.dataDir, topic)
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		// Legacy: files written with the old "@" separator
 		legacyFilename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", strings.ReplaceAll(topic, "/", "@")))
 
 		if _, err := os.Stat(legacyFilename); err == nil {
@@ -131,6 +161,7 @@ func (s *DiskStorage) LoadMessages(topic string) ([]message.Message, error) {
 
 	msgMap := make(map[string]message.Message)
 	var orderedIDs []string
+	corruptedCount := 0
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4<<20), 4<<20)
@@ -138,6 +169,14 @@ func (s *DiskStorage) LoadMessages(topic string) ([]message.Message, error) {
 	for scanner.Scan() {
 		var rec LogRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			corruptedCount++
+			log.Printf("[WAL] Failed to parse record in topic '%s': %v — skipping\n", topic, err)
+			continue
+		}
+
+		if !validateRecord(rec) {
+			corruptedCount++
+			log.Printf("[WARN] Checksum mismatch, skipping corrupted record (topic='%s', type=%s)\n", topic, rec.Type)
 			continue
 		}
 
@@ -150,6 +189,10 @@ func (s *DiskStorage) LoadMessages(topic string) ([]message.Message, error) {
 		case RecordAck:
 			delete(msgMap, rec.MessageID)
 		}
+	}
+
+	if corruptedCount > 0 {
+		log.Printf("[WAL] Topic '%s' recovery: %d corrupted record(s) skipped\n", topic, corruptedCount)
 	}
 
 	var activeMessages []message.Message
@@ -175,7 +218,7 @@ func (s *DiskStorage) CompactLog(topic string) error {
 		delete(s.activeFiles, topic)
 	}
 
-	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
+	filename := logFilePath(s.dataDir, topic)
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		return nil
 	}
@@ -187,6 +230,7 @@ func (s *DiskStorage) CompactLog(topic string) error {
 
 	msgMap := make(map[string]LogRecord)
 	var orderedIDs []string
+	corruptedCount := 0
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4<<20), 4<<20)
@@ -194,6 +238,14 @@ func (s *DiskStorage) CompactLog(topic string) error {
 	for scanner.Scan() {
 		var rec LogRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			corruptedCount++
+			log.Printf("[WAL] Compaction: failed to parse record in topic '%s': %v\n", topic, err)
+			continue
+		}
+
+		if !validateRecord(rec) {
+			corruptedCount++
+			log.Printf("[WARN] Checksum mismatch, skipping corrupted record (topic='%s', type=%s)\n", topic, rec.Type)
 			continue
 		}
 
@@ -214,6 +266,10 @@ func (s *DiskStorage) CompactLog(topic string) error {
 	}
 	file.Close()
 
+	if corruptedCount > 0 {
+		log.Printf("[WAL] Compaction of topic '%s': discarded %d corrupted record(s)\n", topic, corruptedCount)
+	}
+
 	tmpFilename := filename + ".tmp"
 	tmpFile, err := os.OpenFile(tmpFilename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
@@ -222,16 +278,25 @@ func (s *DiskStorage) CompactLog(topic string) error {
 
 	for _, id := range orderedIDs {
 		if rec, exists := msgMap[id]; exists {
-			bytes, err := json.Marshal(rec)
+			rec.Checksum = checksumFor(rec)
+			b, err := json.Marshal(rec)
 			if err != nil {
 				tmpFile.Close()
+				os.Remove(tmpFilename)
 				return err
 			}
-			if _, err := tmpFile.Write(append(bytes, '\n')); err != nil {
+			if _, err := tmpFile.Write(append(b, '\n')); err != nil {
 				tmpFile.Close()
+				os.Remove(tmpFilename)
 				return err
 			}
 		}
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFilename)
+		return fmt.Errorf("failed to sync compacted log: %w", err)
 	}
 	tmpFile.Close()
 
@@ -266,7 +331,7 @@ func (s *DiskStorage) ClearLog(topic string) error {
 		file.Close()
 	}
 
-	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
+	filename := logFilePath(s.dataDir, topic)
 	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err == nil {
 		s.activeFiles[topic] = file
@@ -287,18 +352,12 @@ func (s *DiskStorage) DeleteLog(topic string) error {
 		delete(s.activeFiles, topic)
 	}
 
-	filename := filepath.Join(s.dataDir, fmt.Sprintf("%s.log", topicToFilename(topic)))
+	filename := logFilePath(s.dataDir, topic)
 	err := os.Remove(filename)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	return err
-}
-
-func topicToFilename(topic string) string {
-	safe := strings.ReplaceAll(topic, "/", "_b_")
-	safe = strings.ReplaceAll(safe, "@", "_a_")
-	return safe
 }
 
 func FilenameToTopic(filename string) string {

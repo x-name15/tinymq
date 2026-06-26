@@ -96,6 +96,8 @@ func main() {
 		handleBench(baseURL, os.Args[2:])
 	case "backup":
 		handleBackup(os.Args[2:])
+	case "restore":
+		handleRestore(os.Args[2:])
 	case "rm", "delete":
 		handleRm(baseURL, os.Args[2:], false)
 	case "purge":
@@ -713,14 +715,180 @@ func handleTop(baseURL string) {
 	}
 }
 
+func handleRestore(args []string) {
+	restoreCmd := flag.NewFlagSet("restore", flag.ExitOnError)
+	fileFlag := restoreCmd.String("file", "", "Backup file to restore (.zip or .tar.gz)")
+	dataDirFlag := restoreCmd.String("data-dir", "./data", "Target data directory (default: ./data)")
+	restoreCmd.Parse(args)
+
+	if *fileFlag == "" {
+		fmt.Printf("%s[Error] --file is required. Example: tmq restore --file tinymq_backup_1234.tar.gz%s\n", colorRed, colorReset)
+		return
+	}
+
+	filename := *fileFlag
+	dataDir := *dataDirFlag
+
+	if entries, err := os.ReadDir(dataDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
+				fmt.Printf("%s[Warn] '%s' already contains .log files. Restoring will overwrite them.%s\n", colorYellow, dataDir, colorReset)
+				fmt.Printf("Continue? [y/N]: ")
+				var answer string
+				fmt.Scanln(&answer)
+				if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+					fmt.Println("Restore cancelled.")
+					return
+				}
+				break
+			}
+		}
+	}
+
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		fmt.Printf("%s[Error] Cannot create data directory '%s': %v%s\n", colorRed, dataDir, err, colorReset)
+		return
+	}
+
+	var err error
+	switch {
+	case strings.HasSuffix(filename, ".tar.gz") || strings.HasSuffix(filename, ".tgz"):
+		err = restoreFromTarGz(filename, dataDir)
+	case strings.HasSuffix(filename, ".zip"):
+		err = restoreFromZip(filename, dataDir)
+	default:
+		fmt.Printf("%s[Error] Unrecognised file format. Expected .zip or .tar.gz%s\n", colorRed, colorReset)
+		return
+	}
+
+	if err != nil {
+		fmt.Printf("%s[Error] Restore failed: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+
+	fmt.Printf("%s✔ Restore complete! Data written to '%s'%s\n", colorGreen, dataDir, colorReset)
+	fmt.Printf("%s  Restart TinyMQ to load the recovered messages.%s\n", colorYellow, colorReset)
+}
+
+func restoreFromTarGz(filename, dataDir string) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("cannot open file: %w", err)
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("cannot read gzip stream: %w", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	restored := 0
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("error reading tar entry: %w", err)
+		}
+
+		if header.Typeflag != tar.TypeReg || !strings.HasSuffix(header.Name, ".log") {
+			continue
+		}
+
+		entryName := filepath.Base(header.Name)
+		if entryName == "." || entryName == ".." {
+			continue
+		}
+
+		destPath := filepath.Join(dataDir, entryName)
+
+		out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			return fmt.Errorf("cannot create '%s': %w", destPath, err)
+		}
+
+		if _, err := io.Copy(out, io.LimitReader(tr, 512<<20)); err != nil {
+			out.Close()
+			return fmt.Errorf("error writing '%s': %w", entryName, err)
+		}
+		out.Close()
+		restored++
+		fmt.Printf("  ↳ restored: %s\n", entryName)
+	}
+
+	if restored == 0 {
+		return fmt.Errorf("archive contained no .log files")
+	}
+
+	fmt.Printf("  %d topic log(s) restored.\n", restored)
+	return nil
+}
+
+func restoreFromZip(filename, dataDir string) error {
+	r, err := zip.OpenReader(filename)
+	if err != nil {
+		return fmt.Errorf("cannot open zip file: %w", err)
+	}
+	defer r.Close()
+
+	restored := 0
+
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() || !strings.HasSuffix(f.Name, ".log") {
+			continue
+		}
+
+		entryName := filepath.Base(f.Name)
+		if entryName == "." || entryName == ".." {
+			continue
+		}
+
+		destPath := filepath.Join(dataDir, entryName)
+
+		rc, err := f.Open()
+		if err != nil {
+			return fmt.Errorf("cannot open zip entry '%s': %w", f.Name, err)
+		}
+
+		out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			rc.Close()
+			return fmt.Errorf("cannot create '%s': %w", destPath, err)
+		}
+
+		if _, err := io.Copy(out, io.LimitReader(rc, 512<<20)); err != nil {
+			rc.Close()
+			out.Close()
+			return fmt.Errorf("error writing '%s': %w", entryName, err)
+		}
+		rc.Close()
+		out.Close()
+		restored++
+		fmt.Printf("  ↳ restored: %s\n", entryName)
+	}
+
+	if restored == 0 {
+		return fmt.Errorf("archive contained no .log files")
+	}
+
+	fmt.Printf("  %d topic log(s) restored.\n", restored)
+	return nil
+}
+
 func handleShell(baseURL string) {
 	fmt.Printf("%sEntering TinyMQ Interactive Shell. Type 'exit' to quit.%s\n", colorBold+colorGreen, colorReset)
 	scanner := bufio.NewScanner(os.Stdin)
+
 	for {
 		fmt.Printf("%stinymq>%s ", colorCyan, colorReset)
 		if !scanner.Scan() {
 			break
 		}
+
 		input := strings.TrimSpace(scanner.Text())
 		if input == "exit" || input == "quit" {
 			break
@@ -731,13 +899,12 @@ func handleShell(baseURL string) {
 
 		parts := strings.SplitN(input, " ", 3)
 		cmd := parts[0]
-
-		var args []string
+		var shellArgs []string
 		if len(parts) > 1 {
 			if (cmd == "pub" || cmd == "publish") && len(parts) == 3 {
-				args = []string{parts[1], parts[2]}
+				shellArgs = []string{parts[1], parts[2]}
 			} else {
-				args = strings.Split(input[len(cmd)+1:], " ")
+				shellArgs = strings.Split(input[len(cmd)+1:], " ")
 			}
 		}
 
@@ -745,23 +912,26 @@ func handleShell(baseURL string) {
 		case "list", "status":
 			handleList(baseURL)
 		case "pub", "publish":
-			handlePublish(baseURL, args)
+			handlePublish(baseURL, shellArgs)
 		case "sub", "consume":
-			handleConsume(baseURL, args)
+			handleConsume(baseURL, shellArgs)
 		case "peek":
-			handlePeek(baseURL, args)
+			handlePeek(baseURL, shellArgs)
 		case "rm", "delete":
-			handleRm(baseURL, args, false)
+			handleRm(baseURL, shellArgs, false)
 		case "purge":
-			handleRm(baseURL, args, true)
+			handleRm(baseURL, shellArgs, true)
 		case "webhook":
-			handleWebhook(baseURL, args)
+			handleWebhook(baseURL, shellArgs)
+		case "restore":
+			handleRestore(shellArgs)
 		case "help":
 			printHelp()
 		default:
-			fmt.Println("Unknown command in shell. Type 'help'.")
+			fmt.Println("Unknown command. Type 'help' to see available commands.")
 		}
 	}
+
 	if err := scanner.Err(); err != nil {
 		fmt.Printf("%s[Error] %v%s\n", colorRed, err, colorReset)
 	}
@@ -773,19 +943,20 @@ func printHelp() {
 	fmt.Println("  tmq <command> [arguments] [flags]")
 	fmt.Println("\nAvailable commands:")
 	fmt.Println("  status, list          Shows the table of active queues, RAM and consumers.")
-	fmt.Println("  pub <queue> <data>    Publishes a message (supports flags --ttl, --delay, --broadcast).")
-	fmt.Println("  sub <queue>           Consumes/extracts messages from the queue (supports --timeout, --limit).")
-	fmt.Println("  peek <queue>          Inspects messages in RAM without deleting them.")
-	fmt.Println("  tail <queue>          Live streaming mode (prints messages in real-time).")
+	fmt.Println("  pub <queue> <data>    Publishes a message (flags: --ttl, --delay, --broadcast).")
+	fmt.Println("  sub <queue>           Consumes messages from the queue (flags: --timeout, --limit).")
+	fmt.Println("  peek <queue>          Inspects messages in RAM without consuming them.")
+	fmt.Println("  tail <queue>          Live streaming mode (prints messages in real-time via SSE).")
 	fmt.Println("  bench <queue>         Runs a high-concurrency stress test (flags: --total, --concurrency).")
-	fmt.Println("  backup                Compresses the ./data folder (flags: --format=zip|tar).")
+	fmt.Println("  backup                Compresses ./data into an archive (flags: --format=zip|tar).")
+	fmt.Println("  restore               Restores a backup archive into ./data (flags: --file, --data-dir).")
 	fmt.Println("  rm <queue>            Deletes a queue and its log file entirely.")
 	fmt.Println("  purge <queue>         Empties a queue without deleting it.")
-	fmt.Println("  webhook <add|list>    Manages webhooks for a topic (e.g., webhook add topic http://...).")
-	fmt.Println("  top                   Live dashboard in your terminal.")
+	fmt.Println("  webhook <add|list>    Manages webhooks for a topic.")
+	fmt.Println("  top                   Live dashboard in your terminal (refreshes every 2s).")
 	fmt.Println("  shell                 Opens an interactive REPL session.")
 	fmt.Println("\nEnvironment variables:")
-	fmt.Println("  TINYMQ_URL            Broker URL (Default: http://localhost:7800)")
-	fmt.Println("  TINYMQ_API_KEY        API Token for authenticated endpoints (Optional)")
+	fmt.Println("  TINYMQ_URL            Broker URL (default: http://localhost:7800)")
+	fmt.Println("  TINYMQ_API_KEY        API token for authenticated endpoints (optional)")
 	fmt.Println()
 }

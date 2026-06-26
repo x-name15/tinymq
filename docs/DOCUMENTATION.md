@@ -13,6 +13,8 @@ TinyMQ uses an append-only `.log` file per topic (Write-Ahead Log):
 - Publishing appends a `PUT` event.
 - Acknowledging appends an `ACK` event.
 
+Each WAL record now includes a CRC32 checksum. On recovery and compaction, TinyMQ verifies the checksum and skips corrupted records instead of replaying them silently.
+
 On startup, the broker replays logs to rebuild the in-memory state of unacknowledged messages. An **Auto-Compaction** background routine (Garbage Collector) runs periodically to purge confirmed records and prevent infinite disk growth. *Lazy Initialization* ensures that `.log` files are only created when the first message is published.
 
 ### Lock-free routing & wildcards
@@ -398,6 +400,7 @@ tmq rm <topic>          # Completely deletes a topic and its .log file
 tmq purge <topic>       # Empties a topic without deleting it
 tmq webhook list <top>  # Lists registered webhooks for a topic
 tmq webhook add <top> <url> # Registers a new webhook destination
+tmq restore             # Restores a backup archive into ./data (--file, --data-dir)
 
 # Utilities
 tmq bench <topic>       # Runs a high-concurrency stress test
@@ -614,6 +617,9 @@ docker run -d \
 - `TINYMQ_DEFAULT_POLICY`: Defines memory behavior when a queue hits its limit. Set to `reject` (returns HTTP 429) or `drop-oldest` (acts as a Ring Buffer).
 - `TINYMQ_MAX_MESSAGES`: Maximum number of messages held in RAM per topic (default `100000`).
 - `TINYMQ_API_KEY`: Secures the broker. If set, all endpoints (including the Dashboard) will require an `Authorization: Bearer <token>` HTTP header.
+- `TINYMQ_RATE_LIMIT`: Per-IP request rate limit for authenticated REST routes, in requests per second. Set to a positive value to enable throttling.
+- `TINYMQ_TLS_CERT`: Path to the TLS certificate file for the REST server. If unset, TinyMQ stays on plain HTTP.
+- `TINYMQ_TLS_KEY`: Path to the TLS private key file for the REST server. TLS is enabled only when this and `TINYMQ_TLS_CERT` are both set.
 - `TINYMQ_MAX_TOPICS`: Limits the maximum number of unique topics/queues allowed in memory (default `10000`) to protect against DoS attacks.
 
 ### MQTT settings

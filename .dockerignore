@@ -16,7 +16,10 @@ data/
 .git/
 .gitignore
 
-#Ignore Repomix
+#Ignore Repomix things
+.repomix/
+.repomixignore
+repomix.config.json
 repomix-output*.xml
 
 # Ignore local binaries and CLI source (Docker only needs the broker)

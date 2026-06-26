@@ -48,6 +48,7 @@ type Server struct {
 	version     string
 	startTime   time.Time
 	clusterNode *cluster.Node
+	rateLimiter *ipRateLimiter
 }
 
 func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *Server {
@@ -60,7 +61,10 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 
 	mux := http.NewServeMux()
 
-	// Core API
+	// ── Health Check ──────────────────────────────────────────
+	mux.HandleFunc("/healthz", s.handleHealthz)
+
+	// ── Routes with Auth and Proxy ─────────────────────────────────────────
 	mux.HandleFunc("/publish/", s.leaderProxy(s.withAuth(s.handlePublish)))
 	mux.HandleFunc("/consume/", s.leaderProxy(s.withAuth(s.handleConsume)))
 	mux.HandleFunc("/ack/", s.leaderProxy(s.withAuth(s.handleAck)))
@@ -68,11 +72,11 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 	mux.HandleFunc("/webhook/", s.leaderProxy(s.withAuth(s.handleRegisterWebhook)))
 	mux.HandleFunc("/api/topics", s.leaderProxy(s.withAuth(s.handleCreateTopic)))
 	mux.HandleFunc("/stream/", s.leaderProxy(s.withAuth(s.handleStream)))
-	mux.HandleFunc("/healthz", s.handleHealthz)
 
-	// UI & Telemetry
+	// ── Routes with Auth (read-only, no proxy needed) ─────────────────
 	mux.HandleFunc("/dashboard", s.withAuth(s.handleDashboard))
 	mux.HandleFunc("/metrics", s.withAuth(s.handleMetrics))
+
 	mux.HandleFunc("/api/stats", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		stats, totalWebhooks := b.GetStats()
 		w.Header().Set("Content-Type", "application/json")
@@ -82,14 +86,12 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 		})
 	}))
 
-	// Dashboard/CLI Queue Management API
 	mux.HandleFunc("/api/queues", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			s.handleListQueues(w, r)
 		case http.MethodPost:
 			s.leaderProxy(s.handleCreateTopic)(w, r)
-			return
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -102,19 +104,25 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 	mux.HandleFunc("/api/queues/delete", s.leaderProxy(s.withAuth(s.handleQueueDelete)))
 	mux.HandleFunc("/api/queues/webhooks", s.withAuth(s.handleGetWebhooks))
 
+	// WebSocket
+	wsServer := ws.NewServer(b)
+	mux.HandleFunc("/ws", s.leaderProxy(s.withAuth(wsServer.HandleWS)))
+
+	// ── Rate limiting ──────────────────────────────────────────────────────
+	if rate := getRateLimitFromEnv(); rate > 0 {
+		s.rateLimiter = newIPRateLimiter(rate)
+		log.Printf("[RateLimit] Enabled: %.0f req/s per IP\n", rate)
+	}
+
 	s.httpServer = &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
 	}
 
-	// WebSockets (Protocol TMP-WS)
-	wsServer := ws.NewServer(b)
-	mux.HandleFunc("/ws", s.leaderProxy(s.withAuth(wsServer.HandleWS)))
-
 	return s
 }
 
-// --- MIDDLEWARE REVERSE PROXY OPTIMIZADO PARA WEBSOCKETS ---
+// --- MIDDLEWARE REVERSE PROXY ---
 func (s *Server) leaderProxy(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.clusterNode != nil && !s.clusterNode.IsLeader() {
@@ -158,9 +166,20 @@ func (s *Server) leaderProxy(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) Start() error {
-	log.Printf("TinyMQ REST/HTTP listening on port %s\n", s.httpServer.Addr)
+	certFile := os.Getenv("TINYMQ_TLS_CERT")
+	keyFile := os.Getenv("TINYMQ_TLS_KEY")
+
+	if certFile != "" && keyFile != "" {
+		log.Printf("[REST] TinyMQ HTTPS (TLS) listening on %s\n", s.httpServer.Addr)
+		if err := s.httpServer.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+			return fmt.Errorf("HTTPS server error: %w", err)
+		}
+		return nil
+	}
+
+	log.Printf("[REST] TinyMQ HTTP listening on %s\n", s.httpServer.Addr)
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
+		return fmt.Errorf("HTTP server error: %w", err)
 	}
 	return nil
 }
@@ -173,6 +192,16 @@ func (s *Server) Stop(ctx context.Context) error {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.rateLimiter != nil {
+			ip := extractIP(r)
+			if !s.rateLimiter.Allow(ip) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, `{"error":"rate_limit_exceeded","retry_after_seconds":1}`, http.StatusTooManyRequests)
+				return
+			}
+		}
+
 		token := os.Getenv("TINYMQ_API_KEY")
 		if token == "" {
 			next(w, r)
@@ -211,15 +240,13 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // --- Handlers ---
 
-// extractTopicFromPath extrae el topic de la URL eliminando el prefijo dado.
-// Ejemplo: prefix="/publish/", path="/publish/foo/bar" -> "foo/bar"
 func extractTopicFromPath(r *http.Request, prefix string) string {
 	path := r.URL.Path
 	if !strings.HasPrefix(path, prefix) {
 		return ""
 	}
 	topic := strings.TrimPrefix(path, prefix)
-	// Eliminar posibles trailing slash
+
 	topic = strings.TrimSuffix(topic, "/")
 	return topic
 }
@@ -395,7 +422,6 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
-	// Extraer topic y msgID de /ack/{topic}/{msgID}
 	path := strings.TrimPrefix(r.URL.Path, "/ack/")
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
