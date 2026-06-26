@@ -3,6 +3,35 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.9.0] - 2026-06-26 — Native NATS Gateway, Cross-Transport Routing, some fixes and Repo Management
+
+### Features & Transport
+- **Native NATS Gateway:** Added a built-in NATS TCP server. TinyMQ now speaks the core NATS protocol natively (`INFO`, `CONNECT`, `PING`, `PONG`, `PUB`, `SUB`, `UNSUB`).
+- **Cross-Transport Interoperability:** True multi-protocol routing. Messages published via HTTP or MQTT can now be seamlessly consumed by NATS subscribers, and vice versa.
+- **Protocol Subject Translation:** Automatic on-the-fly mapping of NATS multi-level wildcards (e.g., `>` and `.>`) to TinyMQ's native wildcard syntax (`*`).
+
+### Security & Configuration
+- **NATS Authentication:** NATS clients are authenticated via the standard `CONNECT` JSON payload. TinyMQ automatically validates `auth_token`, `user`, or `pass` fields against the existing `TINYMQ_API_KEY`.
+- **Opt-In Gateway:** The NATS server remains zero-overhead and is disabled by default. It can be explicitly enabled by setting the new `TINYMQ_NATS_PORT` environment variable.
+
+### Performance
+- **Zero-I/O Benchmarking:** The internal logger is now automatically muted when running performance tests (both internal `go test` benchmarks and the `tmq bench` CLI command). This prevents terminal standard output (stdout) from acting as an I/O bottleneck, revealing the true throughput limits of the broker.
+
+### CLI (tmq)
+- **Multi-Protocol Benchmarking:** The `tmq bench` command now supports evaluating both the HTTP API and the native NATS TCP gateway.
+  - Added `--protocol` flag (defaults to `http`, accepts `nats`).
+  - Added `--target` flag for direct TCP connection routing.
+- **Example Usage:** `tmq bench events.click --protocol=nats --target=127.0.0.1:40104 --total=100000 --concurrency=100`
+
+### Testing
+- Added `BenchmarkNATSPublishSequential` and `BenchmarkNATSPublishParallel` to the internal suite to track real-time multi-core processing speeds against the TCP socket.
+
+### Community & Repository Management
+- **Contributing Guidelines:** Added `CONTRIBUTING.md` to establish clear workflows for local development, testing, and PR submissions.
+- **Code of Conduct:** Added a pragmatically tailored `CODE_OF_CONDUCT.md` to protect maintainer bandwidth and ensure technical discussions remain respectful and productive.
+- **Issue Templates:** Introduced structured GitHub Issue Templates for Bug Reports and Feature Requests to enforce minimum reproducible context and streamline triaging.
+
+---
 ## [2.8.5] - 2026-06-25 — WAL Checksums, Rate Limit and new command to the CLI
 
 ### Security

@@ -1,20 +1,24 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/x-name15/tinymq/internal/broker"
 	"github.com/x-name15/tinymq/internal/cluster"
 	"github.com/x-name15/tinymq/internal/transport/mqtt"
+	"github.com/x-name15/tinymq/internal/transport/nats"
 )
 
-// TestAllInOne_EndToEnd_Flow test total integration of TinyMQ: Broker + Storage + Cluster + MQTT
+// TestAllInOne_EndToEnd_Flow test total integration of TinyMQ: Broker + Storage + Cluster + MQTT + NATS
 func TestAllInOne_EndToEnd_Flow(t *testing.T) {
 	os.Setenv("TINYMQ_CLUSTER_SECRET", "e2e-super-secret-key")
 	os.Setenv("TINYMQ_CLUSTER_LEADER", "false")
@@ -27,6 +31,7 @@ func TestAllInOne_EndToEnd_Flow(t *testing.T) {
 	b1 := broker.New(nil)
 	b2 := broker.New(nil)
 
+	// --- 1. CLUSTER SETUP ---
 	n1 := cluster.NewNode("127.0.0.1:40101", "7801", b1)
 	n1.Role = cluster.Leader
 	n1.CurrentTerm = 1
@@ -53,16 +58,23 @@ func TestAllInOne_EndToEnd_Flow(t *testing.T) {
 	}
 	defer n2.Stop()
 
+	// --- 2. MQTT SETUP (Attached to Leader b1) ---
 	mqttPort := "40103"
 	mqttSrv := mqtt.NewServer(b1)
-
 	go mqttSrv.Start(mqttPort)
 	defer mqttSrv.Stop()
+
+	// --- 3. NATS SETUP (Attached to Follower b2) ---
+	natsPort := "40104"
+	natsSrv := nats.NewServer(b2)
+	go natsSrv.Start(natsPort)
+	defer natsSrv.Stop()
 
 	time.Sleep(200 * time.Millisecond)
 
 	targetTopic := "e2e/sensors/temperature"
 
+	// --- 4. MQTT CLIENT CONNECT & SUB ---
 	mqttConn, err := net.DialTimeout("tcp", "127.0.0.1:"+mqttPort, 2*time.Second)
 	if err != nil {
 		t.Fatalf("MQTT client failed to connect: %v", err)
@@ -76,67 +88,84 @@ func TestAllInOne_EndToEnd_Flow(t *testing.T) {
 		0x00, 0x3C,
 		0x00, 0x06, 'i', 'o', 't', '1', '2', '3',
 	}
-
 	mqttConn.Write(connectPacket)
 
 	connAck := make([]byte, 4)
 	io.ReadFull(mqttConn, connAck)
-
 	if connAck[3] != 0x00 {
 		t.Fatalf("MQTT connection rejected. CONNACK: %v", connAck)
 	}
 
 	topicLen := len(targetTopic)
-
 	subPacket := []byte{
 		0x82,
 		byte(topicLen + 5),
-		0x00,
-		0x01,
-		byte(topicLen >> 8),
-		byte(topicLen),
+		0x00, 0x01,
+		byte(topicLen >> 8), byte(topicLen),
 	}
-
 	subPacket = append(subPacket, []byte(targetTopic)...)
 	subPacket = append(subPacket, 0x00)
-
 	mqttConn.Write(subPacket)
 
 	subAck := make([]byte, 5)
 	io.ReadFull(mqttConn, subAck)
 
+	// --- 5. NATS CLIENT CONNECT & SUB ---
+	natsConn, err := net.DialTimeout("tcp", "127.0.0.1:"+natsPort, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NATS client failed to connect: %v", err)
+	}
+	defer natsConn.Close()
+
+	natsReader := bufio.NewReader(natsConn)
+
+	// Read INFO frame
+	_, err = natsReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Failed to read NATS INFO: %v", err)
+	}
+
+	// Connect & Validate
+	fmt.Fprintf(natsConn, "CONNECT {\"verbose\":false}\r\n")
+
+	connectAck, err := natsReader.ReadString('\n')
+	if err != nil || strings.TrimRight(connectAck, "\r\n") != "+OK" {
+		t.Fatalf("Expected +OK after NATS CONNECT, got: %q", connectAck)
+	}
+
+	// Subscribe
+	fmt.Fprintf(natsConn, "SUB %s 1\r\n", targetTopic)
+
+	// --- 6. INTERNAL SPY SETUP (Attached to Follower b2) ---
 	wsChan, err := b2.AddSpy(targetTopic)
 	if err != nil {
 		t.Fatalf("Failed to add internal consumer to follower node: %v", err)
 	}
 
+	// Wait for subscriptions to register globally
 	time.Sleep(100 * time.Millisecond)
 
+	// --- 7. PUBLISH MESSAGE TO LEADER ---
 	payload := []byte("FIRE_ALERT_99C")
-
 	err = b1.Publish(targetTopic, payload, nil, "normal", nil, nil, false)
 	if err != nil {
 		t.Fatalf("Base publish operation failed: %v", err)
 	}
 
+	// --- 8. ASSERT INTERNAL CONSUMER (Validates Cluster Replication) ---
 	select {
 	case msg := <-wsChan:
 		if !bytes.Equal(msg.Payload, payload) {
-			t.Errorf(
-				"Follower received corrupted data. Expected %s, received %s",
-				payload,
-				msg.Payload,
-			)
+			t.Errorf("Follower received corrupted data. Expected %s, received %s", payload, msg.Payload)
 		} else {
-			t.Log("SUCCESS: Follower replicated cluster data and delivered it to the WebSocket client.")
+			t.Log("SUCCESS: Follower replicated cluster data and delivered it to the internal Spy.")
 		}
-
 	case <-time.After(2 * time.Second):
 		t.Fatal("ERROR: Message never reached the follower. Cluster TCP replication failed.")
 	}
 
+	// --- 9. ASSERT MQTT GATEWAY ---
 	mqttConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-
 	mqttHeader := make([]byte, 1)
 	_, err = io.ReadFull(mqttConn, mqttHeader)
 	if err != nil {
@@ -145,34 +174,44 @@ func TestAllInOne_EndToEnd_Flow(t *testing.T) {
 
 	remLenBuf := make([]byte, 1)
 	io.ReadFull(mqttConn, remLenBuf)
-
 	remLen := int(remLenBuf[0])
-
 	mqttData := make([]byte, remLen)
 	io.ReadFull(mqttConn, mqttData)
 
 	topicSize := binary.BigEndian.Uint16(mqttData[0:2])
-
 	recTopic := string(mqttData[2 : 2+topicSize])
 	recPayload := mqttData[2+topicSize:]
 
 	if recTopic != targetTopic {
-		t.Errorf(
-			"MQTT routing failure. Expected topic: %s, received: %s",
-			targetTopic,
-			recTopic,
-		)
+		t.Errorf("MQTT routing failure. Expected topic: %s, received: %s", targetTopic, recTopic)
 	}
-
 	if !bytes.Equal(recPayload, payload) {
-		t.Errorf(
-			"MQTT payload mismatch. Expected: %s, received: %s",
-			payload,
-			recPayload,
-		)
+		t.Errorf("MQTT payload mismatch. Expected: %s, received: %s", payload, recPayload)
 	} else {
 		t.Log("SUCCESS: MQTT gateway packaged the broker message and delivered it to the IoT device.")
 	}
 
-	t.Log("ALL-IN-ONE E2E TEST PASSED: Cluster, Broker, WebSockets, and MQTT operating correctly.")
+	// --- 10. ASSERT NATS GATEWAY ---
+	natsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	natsMsgLine, err := natsReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ERROR: NATS client did not receive the MSG header: %v", err)
+	}
+	if !strings.HasPrefix(natsMsgLine, "MSG "+targetTopic) {
+		t.Errorf("NATS routing failure. Unexpected header: %s", natsMsgLine)
+	}
+
+	natsPayloadLine, err := natsReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ERROR: NATS client did not receive payload: %v", err)
+	}
+
+	natsRecPayload := strings.TrimRight(natsPayloadLine, "\r\n")
+	if natsRecPayload != string(payload) {
+		t.Errorf("NATS payload mismatch. Expected: %s, received: %s", payload, natsRecPayload)
+	} else {
+		t.Log("SUCCESS: NATS gateway read replicated data and delivered it perfectly via TCP.")
+	}
+
+	t.Log("ALL-IN-ONE E2E TEST PASSED: Cluster, Broker, Internal Spies, NATS, and MQTT operating correctly and in sync.")
 }

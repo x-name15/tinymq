@@ -27,7 +27,6 @@ type WSClient struct {
 }
 
 func NewWSClient(baseURL string, apiKey ...string) *WSClient {
-	// Transformar http:// a ws://
 	wsURL := strings.Replace(baseURL, "http://", "ws://", 1)
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
 

@@ -56,8 +56,6 @@ func BenchmarkBrokerConsume(b *testing.B) {
 	topic := "bench"
 	brk.CreateTopic(topic, "reject", 0)
 	payload := []byte("hello world")
-
-	// Pre-fill the queue with 1000 messages.
 	for i := 0; i < 1000; i++ {
 		_ = brk.Publish(topic, payload, nil, "normal", nil, nil, false)
 	}
@@ -116,8 +114,6 @@ func BenchmarkBrokerPeek(b *testing.B) {
 	topic := "bench"
 	brk.CreateTopic(topic, "reject", 0)
 	payload := []byte("hello world")
-
-	// Pre-fill with 100 messages.
 	for i := 0; i < 100; i++ {
 		_ = brk.Publish(topic, payload, nil, "normal", nil, nil, false)
 	}

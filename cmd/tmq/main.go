@@ -10,6 +10,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -421,20 +423,31 @@ func handleBench(baseURL string, args []string) {
 	benchCmd := flag.NewFlagSet("bench", flag.ExitOnError)
 	total := benchCmd.Int("total", 20000, "Total messages to publish")
 	concurrency := benchCmd.Int("concurrency", 50, "Number of concurrent workers")
+	protocol := benchCmd.String("protocol", "http", "Protocol to benchmark: 'http' or 'nats'")
+	target := benchCmd.String("target", "127.0.0.1:40104", "Target TCP address for NATS (e.g., 127.0.0.1:40104)")
 
 	benchCmd.Parse(args)
 	leftover := benchCmd.Args()
 
 	if len(leftover) < 1 {
-		fmt.Println("Usage: tmq bench <topic> [--total=20000] [--concurrency=50]")
+		fmt.Println("Usage: tmq bench <topic> [--protocol=http|nats] [--total=20000] [--concurrency=50] [--target=ip:port]")
 		return
 	}
 	topic := leftover[0]
-	safeTopic := url.PathEscape(topic)
 
+	if *protocol == "nats" {
+		runNatsBench(*target, topic, *total, *concurrency)
+		return
+	}
+
+	// ─── HTTP Benchmark Logic ──────────────────────────────────────────
+	safeTopic := url.PathEscape(topic)
 	fmt.Printf("Starting TinyMQ Benchmark...\n")
-	fmt.Printf("Target: %s/publish/%s\n", baseURL, topic)
+	fmt.Printf("Protocol: HTTP\nTarget: %s/publish/%s\n", baseURL, topic)
 	fmt.Printf("Messages: %d | Concurrency: %d\n\n", *total, *concurrency)
+	originalOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(originalOutput)
 
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -446,7 +459,6 @@ func handleBench(baseURL string, args []string) {
 	}
 
 	payload := []byte(`{"event":"bench","data":"stress_test_payload_123456789"}`)
-
 	var successCount int32
 	var failCount int32
 	var wg sync.WaitGroup
@@ -490,6 +502,72 @@ func handleBench(baseURL string, args []string) {
 		jobs <- j
 	}
 	close(jobs)
+	wg.Wait()
+
+	duration := time.Since(start)
+	msgsPerSec := float64(successCount) / duration.Seconds()
+
+	fmt.Printf("📊 --- BENCHMARK RESULTS ---\n")
+	fmt.Printf("Time Taken:       %.2f seconds\n", duration.Seconds())
+	fmt.Printf("Successful:       %d\n", successCount)
+	fmt.Printf("Failed:           %d\n", failCount)
+	fmt.Printf("Throughput:       \033[32m\033[1m%.2f msgs/sec\033[0m\n", msgsPerSec)
+}
+
+func runNatsBench(target, topic string, total, concurrency int) {
+	fmt.Printf("Starting TinyMQ Benchmark...\n")
+	fmt.Printf("Protocol: NATS TCP\nTarget: %s | Topic: %s\n", target, topic)
+	fmt.Printf("Messages: %d | Concurrency: %d\n\n", total, concurrency)
+
+	originalOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(originalOutput)
+
+	payload := "stress_test_payload_123456789"
+	pubLine := fmt.Sprintf("PUB %s %d\r\n%s\r\n", topic, len(payload), payload)
+	pubBytes := []byte(pubLine)
+
+	var successCount int32
+	var failCount int32
+	var wg sync.WaitGroup
+
+	msgsPerWorker := total / concurrency
+	start := time.Now()
+
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+
+		workerMsgs := msgsPerWorker
+		if w == concurrency-1 {
+			workerMsgs += total % concurrency
+		}
+
+		go func(msgs int) {
+			defer wg.Done()
+
+			conn, err := net.DialTimeout("tcp", target, 5*time.Second)
+			if err != nil {
+				atomic.AddInt32(&failCount, int32(msgs))
+				return
+			}
+			defer conn.Close()
+
+			reader := bufio.NewReader(conn)
+			reader.ReadString('\n') // Consume INFO
+			fmt.Fprintf(conn, "CONNECT {\"verbose\":false}\r\n")
+			reader.ReadString('\n') // Consume +OK
+
+			for i := 0; i < msgs; i++ {
+				_, err := conn.Write(pubBytes)
+				if err != nil {
+					atomic.AddInt32(&failCount, int32(msgs-i))
+					break
+				}
+				atomic.AddInt32(&successCount, 1)
+			}
+		}(workerMsgs)
+	}
+
 	wg.Wait()
 
 	duration := time.Since(start)
@@ -661,7 +739,7 @@ func handleRm(baseURL string, args []string, isPurge bool) {
 
 func handleWebhook(baseURL string, args []string) {
 	if len(args) < 2 {
-		fmt.Println("Use: tmq webhook list <topic>\n     tmq webhook add <topic> <url>")
+		fmt.Println("Use: tmq webhook list <topic>\n    tmq webhook add <topic> <url>")
 		return
 	}
 	action, topic := args[0], args[1]
@@ -925,6 +1003,8 @@ func handleShell(baseURL string) {
 			handleWebhook(baseURL, shellArgs)
 		case "restore":
 			handleRestore(shellArgs)
+		case "bench":
+			handleBench(baseURL, shellArgs)
 		case "help":
 			printHelp()
 		default:
@@ -947,7 +1027,7 @@ func printHelp() {
 	fmt.Println("  sub <queue>           Consumes messages from the queue (flags: --timeout, --limit).")
 	fmt.Println("  peek <queue>          Inspects messages in RAM without consuming them.")
 	fmt.Println("  tail <queue>          Live streaming mode (prints messages in real-time via SSE).")
-	fmt.Println("  bench <queue>         Runs a high-concurrency stress test (flags: --total, --concurrency).")
+	fmt.Println("  bench <queue>         Runs a stress test (flags: --protocol=http|nats, --total, --concurrency, --target).")
 	fmt.Println("  backup                Compresses ./data into an archive (flags: --format=zip|tar).")
 	fmt.Println("  restore               Restores a backup archive into ./data (flags: --file, --data-dir).")
 	fmt.Println("  rm <queue>            Deletes a queue and its log file entirely.")

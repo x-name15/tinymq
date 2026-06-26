@@ -171,6 +171,10 @@ func TestChecksumCompactionRewritesWithChecksum(t *testing.T) {
 			t.Error("compacted record has checksum=0, expected a real checksum")
 		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("error reading compacted log: %v", err)
+	}
 }
 
 func TestChecksumAckRecordIsAlsoChecksummed(t *testing.T) {
@@ -198,6 +202,11 @@ func TestChecksumAckRecordIsAlsoChecksummed(t *testing.T) {
 			t.Errorf("line %d: expected non-zero checksum, got %v", lineNum, cs)
 		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("error reading ack log: %v", err)
+	}
+
 	if lineNum != 2 {
 		t.Errorf("expected 2 log records (PUT + ACK), got %d", lineNum)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/x-name15/tinymq/internal/helper"
 	"github.com/x-name15/tinymq/internal/storage"
 	"github.com/x-name15/tinymq/internal/transport/mqtt"
+	natssrv "github.com/x-name15/tinymq/internal/transport/nats"
 	"github.com/x-name15/tinymq/internal/transport/rest"
 )
 
@@ -141,6 +142,19 @@ func main() {
 		log.Println("MQTT server disabled natively via configuration.")
 	}
 
+	natsPort := os.Getenv("TINYMQ_NATS_PORT")
+	var natsServer *natssrv.Server
+	if natsPort != "" {
+		natsServer = natssrv.NewServer(b)
+		go func() {
+			if err := natsServer.Start(natsPort); err != nil {
+				log.Fatalf("Failed to start NATS server: %v", err)
+			}
+		}()
+	} else {
+		log.Println("NATS gateway disabled (set TINYMQ_NATS_PORT to enable).")
+	}
+
 	go func() {
 		if err := restServer.Start(); err != nil {
 			log.Fatalf("Failed to start REST server: %v", err)
@@ -167,6 +181,11 @@ func main() {
 	if mqttServer != nil {
 		mqttServer.Stop()
 	}
+
+	if natsServer != nil {
+		natsServer.Stop()
+	}
+
 	store.CloseAll()
 	log.Println("TinyMQ stopped.")
 }

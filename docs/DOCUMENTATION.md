@@ -337,6 +337,133 @@ When `TINYMQ_API_KEY` is active, IoT clients must present the token inside the *
 MQTT topic layers are fully compatible with TinyMQ's core wildcard architecture. The multi-level MQTT wildcard `#` is automatically translated to TinyMQ's internal global wildcard `*`.
 
 ---
+## NATS Gateway (Protocol Compatibility)
+
+TinyMQ includes a native **NATS text-protocol** gateway, enabling any existing NATS client library to connect directly without a custom SDK or OpenAPI generator. This means Python (`nats-py`), Go (`nats.go`), Node.js (`nats.ws`), Rust (`async-nats`), and any other NATS-compatible client can publish and subscribe to TinyMQ topics out of the box.
+
+Enable it by setting `TINYMQ_NATS_PORT=4222` (the standard NATS port) in your environment.
+
+### How it works
+
+The NATS gateway connects to the same broker core as the HTTP, WebSocket, and MQTT transports. Messages flow freely between transports:
+
+- A Python client publishes via NATS → a Go microservice consumes via HTTP.
+- An HTTP `POST /publish/alerts` → a browser WebSocket receives the push → an IoT sensor subscribed via MQTT also receives it → a Node.js service subscribed via NATS receives it too.
+
+Subscriptions use TinyMQ's **Spy mode** (non-destructive fan-out), identical to the `/stream/` SSE endpoint and WebSocket subscriptions. A message published to a topic is pushed to all active NATS subscribers without being dequeued from the main queue.
+
+### Authentication
+
+When `TINYMQ_API_KEY` is set, clients must include the token in the `CONNECT` JSON payload. The gateway accepts it in any of the three standard NATS auth fields:
+
+```json
+// Via auth_token (most common)
+{"verbose": false, "auth_token": "<your_token>"}
+
+// Via user/pass fields
+{"verbose": false, "user": "tinymq", "pass": "<your_token>"}
+```
+
+Connections that provide no token or a wrong token receive `-ERR 'Authorization Violation'` and are immediately closed.
+
+### Subject mapping
+
+NATS subjects use dot-separated hierarchies. They map directly to TinyMQ topics:
+
+| NATS Subject | TinyMQ Topic | Notes |
+|---|---|---|
+| `orders.eu.new` | `orders.eu.new` | Direct 1:1 mapping |
+| `iot.>` | `iot.*` | NATS multi-level wildcard `>` → TinyMQ `*` |
+| `>` | `*` | Receive all messages |
+| `sensors.*.temp` | `sensors.*.temp` | Single-level `*` passes through unchanged |
+
+### Supported NATS commands
+
+| Command | Direction | Description |
+|---|---|---|
+| `INFO {...}` | S→C | Sent immediately on connect. Contains `server_id`, `version`, `max_payload`, `auth_required`. |
+| `CONNECT {...}` | C→S | JSON handshake. Validates auth token if `TINYMQ_API_KEY` is set. |
+| `PUB <subject> <bytes>\r\n[payload]\r\n` | C→S | Publishes `payload` to the broker on the given subject. |
+| `SUB <subject> <sid>\r\n` | C→S | Registers a non-destructive subscription. `sid` is a client-chosen identifier used in MSG frames. |
+| `UNSUB <sid>\r\n` | C→S | Removes the subscription identified by `sid`. Message delivery stops immediately. |
+| `PING\r\n` | C↔S | Heartbeat. Server replies with `PONG\r\n`. |
+| `MSG <subject> <sid> <bytes>\r\n[payload]\r\n` | S→C | Server push frame for active subscribers. |
+| `+OK\r\n` | S→C | Acknowledgement for a successful `CONNECT`. |
+| `-ERR '<reason>'\r\n` | S→C | Protocol or auth error. Non-fatal for unknown verbs; fatal for auth violations. |
+
+> **Note:** NATS `CONNECT` verbose mode is ignored — TinyMQ only sends `+OK` once, not on every command. `PONG` responses to server-initiated `PING` frames are accepted and silently discarded.
+
+### System limits
+
+The NATS gateway inherits TinyMQ's global limits:
+
+- **Max payload per PUB:** `2 MB`. Payloads exceeding this are rejected with `-ERR 'max payload exceeded'` before the body is read.
+- **Max active topics:** Governed by `TINYMQ_MAX_TOPICS` (default 10,000).
+- **Idle connection timeout:** 60 seconds. The deadline resets on every received command, so long-lived subscribers are never kicked out while active.
+
+---
+## Appendix: High Availability & Ephemeral Clustering
+
+TinyMQ includes a custom-built, ultra-lightweight, zero-dependency P2P clustering engine designed for high availability and strict data consistency without external consensus tools (like Raft or ZooKeeper).
+
+### Architectural Design
+
+The clustering system works on two fundamental pillars:
+1. **Transparent Leader Proxying:** Followers run in a read-only state for data-modifying mutations. Any HTTP mutation (`/publish/`, `/consume/`, `/ack/`, etc.) hitting a Follower node is automatically intercepted by a high-performance Reverse Proxy and forwarded to the active Leader.
+2. **Quorum-Based Ephemeral Replication:** When the Leader accepts a publish action, it broadcasts the message to all known peers via short-lived TCP sockets using a specialized `REPLICATE` protocol. The operation is only acknowledged to the client (`202 Accepted`) if a strict majority (Quorum) of cluster nodes acknowledge the storage write.
+````
+                  [ Client HTTP Request ]
+                            │
+                            ▼
+                  ┌───────────────────┐
+                  │  Follower Node    │
+                  │  (REST Server)    │
+                  └─────────┬─────────┘
+                            │ (Transparent Proxy)
+                            ▼
+                  ┌───────────────────┐
+                  │    Leader Node    │
+                  │  (REST Server)    │
+                  └─────────┬─────────┘
+                            │
+           ┌────────────────┴────────────────┐
+           ▼ (TCP REPLICATE)                 ▼ (Local Storage)
+┌───────────────────┐               ┌───────────────────┐
+│   Follower Node   │               │   Leader WAL      │
+│   (TCP Socket)    │               │   (Disk Write)    │
+└───────────────────┘               └───────────────────┘
+````
+### Cluster Environment Variables
+
+To activate clustering, configure the following keys in your `.env` file or environment:
+
+* `TINYMQ_CLUSTER_ADDR`: The TCP binding address for intra-cluster communication (e.g., `127.0.0.1:7901`).
+* `TINYMQ_CLUSTER_NODES`: Comma-separated addresses of other cluster participants (e.g., `127.0.0.1:7902,127.0.0.1:7903`).
+* `TINYMQ_CLUSTER_SECRET`: **[SECURITY CRITICAL]** The HMAC-SHA256 secret key. **Warning:** If left empty, the cluster TCP port accepts connections from any peer without authentication, exposing your broker to arbitrary data injection!
+* `TINYMQ_CLUSTER_HTTP_ADVERTISE`: **[Routing]** The HTTP address advertised to followers for Reverse Proxy redirection (e.g., `192.168.1.10:7800`). Crucial for Docker NAT environments.
+* `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Custom timeout for Quorum acknowledgement (Default: `500ms`).
+* `TINYMQ_CLUSTER_LEADER`: Set to `true` to declare a static, designated Leader node and disable automated election timeouts.
+
+### Operational Verification
+
+To monitor cluster consensus health in real-time, inspect the application logging streams. Active peer discovery, reverse proxy redirection, and atomic synchronization states will output under the `[Cluster]` and `[Proxy]` log scopes:
+
+```bash
+[Cluster] Node 127.0.0.1:7902 is now ONLINE
+[Proxy] Forwarding POST request to Leader (127.0.0.1:7801)
+[Cluster] Message replicated to 2 nodes (Quorum OK)
+```
+
+### System Limits & Security
+To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
+- **Max Payload Size:** `2 MB` per HTTP request. Exceeding this limit will safely abort the connection and return an `HTTP 413 Request Entity Too Large` error.
+- **Max Queue Capacity:** Configurable via `TINYMQ_MAX_MESSAGES` (Default: `100,000`). Controls the memory footprint per topic. When exceeded, the broker follows the `TINYMQ_DEFAULT_POLICY` (reject or drop-oldest).
+- **"Topic & Group Validation:** To prevent Path Traversal injections, all topic and consumer group names are strictly validated against the `^[a-zA-Z0-9._:\-/]+$` regex. The forward slash (`/`) is allowed to enable hierarchical topic structures (`e.g., orders/eu, sensors/temperature`)."
+- **Max Active Topics:** Configurable via `TINYMQ_MAX_TOPICS` (Default: `10,000`). Prevents Denial of Service (DoS) attacks that attempt to exhaust server RAM by dynamically generating millions of unique topic names. If the limit is reached, topic creation requests are safely rejected.
+
+> **Note on 503 Service Unavailable:** If the cluster is experiencing a split-brain, leader election, or the Leader node is unreachable, write-operations (`POST`, `DELETE`) on follower nodes will safely reject the request with a `503` status code to prevent data divergence.
+
+---
 
 ## tmq CLI
 
@@ -404,6 +531,7 @@ tmq restore             # Restores a backup archive into ./data (--file, --data-
 
 # Utilities
 tmq bench <topic>       # Runs a high-concurrency stress test
+tmq bench <topic> --protocol=nats --target=127.0.0.1:40104 # Runs an ultra-fast TCP benchmark
 tmq backup              # Compresses the ./data folder (--format=zip|tar)
 ```
 
@@ -509,67 +637,6 @@ func main() {
     select {} // Block forever
 }
 ```
-## Appendix: High Availability & Ephemeral Clustering
-
-TinyMQ includes a custom-built, ultra-lightweight, zero-dependency P2P clustering engine designed for high availability and strict data consistency without external consensus tools (like Raft or ZooKeeper).
-
-### Architectural Design
-
-The clustering system works on two fundamental pillars:
-1. **Transparent Leader Proxying:** Followers run in a read-only state for data-modifying mutations. Any HTTP mutation (`/publish/`, `/consume/`, `/ack/`, etc.) hitting a Follower node is automatically intercepted by a high-performance Reverse Proxy and forwarded to the active Leader.
-2. **Quorum-Based Ephemeral Replication:** When the Leader accepts a publish action, it broadcasts the message to all known peers via short-lived TCP sockets using a specialized `REPLICATE` protocol. The operation is only acknowledged to the client (`202 Accepted`) if a strict majority (Quorum) of cluster nodes acknowledge the storage write.
-````
-                  [ Client HTTP Request ]
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │  Follower Node    │
-                  │  (REST Server)    │
-                  └─────────┬─────────┘
-                            │ (Transparent Proxy)
-                            ▼
-                  ┌───────────────────┐
-                  │    Leader Node    │
-                  │  (REST Server)    │
-                  └─────────┬─────────┘
-                            │
-           ┌────────────────┴────────────────┐
-           ▼ (TCP REPLICATE)                 ▼ (Local Storage)
-┌───────────────────┐               ┌───────────────────┐
-│   Follower Node   │               │   Leader WAL      │
-│   (TCP Socket)    │               │   (Disk Write)    │
-└───────────────────┘               └───────────────────┘
-````
-### Cluster Environment Variables
-
-To activate clustering, configure the following keys in your `.env` file or environment:
-
-* `TINYMQ_CLUSTER_ADDR`: The TCP binding address for intra-cluster communication (e.g., `127.0.0.1:7901`).
-* `TINYMQ_CLUSTER_NODES`: Comma-separated addresses of other cluster participants (e.g., `127.0.0.1:7902,127.0.0.1:7903`).
-* `TINYMQ_CLUSTER_SECRET`: **[SECURITY CRITICAL]** The HMAC-SHA256 secret key. **Warning:** If left empty, the cluster TCP port accepts connections from any peer without authentication, exposing your broker to arbitrary data injection!
-* `TINYMQ_CLUSTER_HTTP_ADVERTISE`: **[Routing]** The HTTP address advertised to followers for Reverse Proxy redirection (e.g., `192.168.1.10:7800`). Crucial for Docker NAT environments.
-* `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Custom timeout for Quorum acknowledgement (Default: `500ms`).
-* `TINYMQ_CLUSTER_LEADER`: Set to `true` to declare a static, designated Leader node and disable automated election timeouts.
-
-### Operational Verification
-
-To monitor cluster consensus health in real-time, inspect the application logging streams. Active peer discovery, reverse proxy redirection, and atomic synchronization states will output under the `[Cluster]` and `[Proxy]` log scopes:
-
-```bash
-[Cluster] Node 127.0.0.1:7902 is now ONLINE
-[Proxy] Forwarding POST request to Leader (127.0.0.1:7801)
-[Cluster] Message replicated to 2 nodes (Quorum OK)
-```
-
-### System Limits & Security
-To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks, TinyMQ enforces the following hard limits natively:
-- **Max Payload Size:** `2 MB` per HTTP request. Exceeding this limit will safely abort the connection and return an `HTTP 413 Request Entity Too Large` error.
-- **Max Queue Capacity:** Configurable via `TINYMQ_MAX_MESSAGES` (Default: `100,000`). Controls the memory footprint per topic. When exceeded, the broker follows the `TINYMQ_DEFAULT_POLICY` (reject or drop-oldest).
-- **"Topic & Group Validation:** To prevent Path Traversal injections, all topic and consumer group names are strictly validated against the `^[a-zA-Z0-9._:\-/]+$` regex. The forward slash (`/`) is allowed to enable hierarchical topic structures (`e.g., orders/eu, sensors/temperature`)."
-- **Max Active Topics:** Configurable via `TINYMQ_MAX_TOPICS` (Default: `10,000`). Prevents Denial of Service (DoS) attacks that attempt to exhaust server RAM by dynamically generating millions of unique topic names. If the limit is reached, topic creation requests are safely rejected.
-
-> **Note on 503 Service Unavailable:** If the cluster is experiencing a split-brain, leader election, or the Leader node is unreachable, write-operations (`POST`, `DELETE`) on follower nodes will safely reject the request with a `503` status code to prevent data divergence.
-
 ---
 
 ## Configuration & deployment
@@ -637,6 +704,10 @@ docker run -d \
 - `TINYMQ_CLUSTER_SECRET`: Shared secret used to sign and verify all intra-cluster TCP messages via HMAC-SHA256. If unset, communication is unauthenticated and peers are accepted without verification.
 - `TINYMQ_CLUSTER_HTTP_ADVERTISE`: The HTTP address this node advertises to followers for reverse proxying (e.g., `192.168.1.10:7800`). Required when the node's bind address is not reachable by peers directly (Docker bridge networks, NAT, etc.).
 - `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Timeout for each peer acknowledgment during quorum replication (default `500ms`). Accepts Go duration strings (e.g., `1s`, `200ms`).
+
+### NATS gateway settings
+
+- `TINYMQ_NATS_PORT`: TCP port for the NATS-compatible gateway. Set to `4222` (the standard NATS port) to enable. Leave empty to disable (default). When enabled, any NATS client library can connect without a custom SDK.
 
 ### Persistent data (Docker Compose)
 

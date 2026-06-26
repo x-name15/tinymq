@@ -6,7 +6,7 @@ examples/
 LICENSE
 CHANGELOG.md
 
-# Ignore GitHub Actions workflows
+# Ignore GitHub general Files
 .github/
 
 # Ignore the local data folder to avoid overwriting it

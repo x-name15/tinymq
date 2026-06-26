@@ -20,6 +20,7 @@ Built from scratch in Go with zero external heavy dependencies.
 | **Consumer Groups (Pub/Sub)** | Multiple microservices can read the same event stream independently via Virtual Topic Binding (`?group=name`) without competing for payloads. |
 | **Native WebSockets** | Full-duplex TCP connections (`/ws`) for sub-millisecond, bi-directional publishing and subscribing. |
 | **Native MQTT (IoT)** | Native v3.1.1 gateway on port `1883`. Seamlessly routes binary IoT data to HTTP/WS clients and back. |
+| **Native NATS Gateway** | Built-in NATS TCP server. Map multi-level wildcards and connect native NATS clients with zero overhead. |
 | **Native Clustering (HA)** | Built-in zero-dependency P2P clustering with automatic leader election, quorum-based replication, and transparent follower proxying. |
 | **Smart Disk Persistence & GC** | Append-only Write-Ahead Log (`.log`) architecture with a background Auto-Compactor (Garbage Collector) to prevent infinite disk growth. |
 | **Strict Durability (FSync)** | Configurable bank-grade physical disk flushing after every operation to protect against sudden power loss. |
