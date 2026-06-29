@@ -98,12 +98,17 @@ func (n *Node) loadPeersFromEnv() {
 	if nodesEnv == "" {
 		return
 	}
-	addresses := strings.Split(nodesEnv, ",")
-	for _, addr := range addresses {
+	selfHostname, _ := os.Hostname()
+	for _, addr := range strings.Split(nodesEnv, ",") {
 		addr = strings.TrimSpace(addr)
-		if addr != "" && addr != n.Address {
-			n.Peers[addr] = &Peer{Address: addr, IsAlive: false}
+		if addr == "" || addr == n.selfAddr() {
+			continue
 		}
+		host, _, _ := net.SplitHostPort(addr)
+		if host == selfHostname || strings.HasPrefix(host, selfHostname+".") {
+			continue
+		}
+		n.Peers[addr] = &Peer{Address: addr, IsAlive: false}
 	}
 }
 
@@ -535,22 +540,26 @@ func (n *Node) dispatchGossip(sem chan struct{}, isLeader bool) {
 	}
 }
 
+func (n *Node) selfAddr() string {
+	if self := os.Getenv("TINYMQ_CLUSTER_SELF"); self != "" {
+		return self
+	}
+	return n.Address
+}
+
 func (n *Node) pingPeer(target string) {
-	conn, err := net.DialTimeout("tcp", target, 500*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", target, 2*time.Second)
 	if err != nil {
 		n.markPeerDead(target)
 		return
 	}
 	defer conn.Close()
-
-	body := fmt.Sprintf("PING %s %s", n.Address, n.HttpPort)
+	body := fmt.Sprintf("PING %s %s", n.selfAddr(), n.HttpPort)
 	mac := n.signMessage(body)
 	fmt.Fprintf(conn, "%s %s\n", body, mac)
-
 	reader := bufio.NewReader(conn)
-	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	resp, err := reader.ReadString('\n')
-
 	if err == nil && strings.TrimSpace(resp) == "PONG" {
 		n.markPeerAlive(target)
 	} else {
@@ -559,17 +568,15 @@ func (n *Node) pingPeer(target string) {
 }
 
 func (n *Node) sendHeartbeat(target string) {
-	conn, err := net.DialTimeout("tcp", target, 500*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", target, 2*time.Second)
 	if err != nil {
 		n.markPeerDead(target)
 		return
 	}
 	defer conn.Close()
-
 	n.mu.RLock()
 	term := n.CurrentTerm
 	n.mu.RUnlock()
-
 	advertiseAddr := os.Getenv("TINYMQ_CLUSTER_HTTP_ADVERTISE")
 	if advertiseAddr == "" {
 		host, _, _ := net.SplitHostPort(n.Address)
@@ -579,15 +586,12 @@ func (n *Node) sendHeartbeat(target string) {
 			advertiseAddr = advertiseAddr + ":" + n.HttpPort
 		}
 	}
-
-	body := fmt.Sprintf("HEARTBEAT %d %s %s", term, n.Address, advertiseAddr)
+	body := fmt.Sprintf("HEARTBEAT %d %s %s", term, n.selfAddr(), advertiseAddr)
 	mac := n.signMessage(body)
 	fmt.Fprintf(conn, "%s %s\n", body, mac)
-
 	reader := bufio.NewReader(conn)
-	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	resp, err := reader.ReadString('\n')
-
 	if err == nil && strings.TrimSpace(resp) == "PONG_HEARTBEAT" {
 		n.markPeerAlive(target)
 	} else {
@@ -634,11 +638,9 @@ func (n *Node) requestSync(leaderAddr string) {
 	}
 	defer conn.Close()
 	log.Printf("[Cluster] Requesting state synchronization from Leader...\n")
-
-	body := fmt.Sprintf("SYNC_REQ %s", n.Address)
+	body := fmt.Sprintf("SYNC_REQ %s", n.selfAddr())
 	mac := n.signMessage(body)
 	fmt.Fprintf(conn, "%s %s\n", body, mac)
-
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 	reader := bufio.NewReader(conn)
 	for {
@@ -651,23 +653,18 @@ func (n *Node) requestSync(leaderAddr string) {
 		if len(parts) == 0 || parts[0] == "" {
 			continue
 		}
-
 		receivedMac := parts[len(parts)-1]
 		msgBody := strings.Join(parts[:len(parts)-1], " ")
-
 		if !n.verifyMessage(msgBody, receivedMac) {
 			log.Printf("[Cluster] SEC-ALERT: Invalid HMAC signature in SYNC response stream, skipping packet safely.")
 			continue
 		}
-
 		parts = parts[:len(parts)-1]
 		cmd := parts[0]
-
 		if cmd == "SYNC_COMPLETE" {
 			log.Println("[Cluster] State synchronization complete.")
 			return
 		}
-
 		if len(parts) >= 4 && cmd == "REPLICATE" {
 			topic := parts[2]
 			payloadB64 := parts[3]
@@ -755,7 +752,7 @@ func (n *Node) startElection() {
 	n.mu.Lock()
 	n.Role = Candidate
 	n.CurrentTerm++
-	n.VotedFor = n.Address
+	n.VotedFor = n.selfAddr() // ← antes: n.Address
 	n.votesReceived = 1
 	n.lastHeartbeatSeen = time.Now()
 	term := n.CurrentTerm
@@ -771,28 +768,26 @@ func (n *Node) startElection() {
 }
 
 func (n *Node) requestVoteFromPeer(addr string, term int) {
-	conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
-
-	body := fmt.Sprintf("REQUEST_VOTE %d %s", term, n.Address)
+	body := fmt.Sprintf("REQUEST_VOTE %d %s", term, n.selfAddr())
 	mac := n.signMessage(body)
 	fmt.Fprintf(conn, "%s %s\n", body, mac)
-
 	reader := bufio.NewReader(conn)
-	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	resp, err := reader.ReadString('\n')
 	if err != nil {
 		return
 	}
 	resp = strings.TrimSpace(resp)
 	if strings.HasPrefix(resp, "VOTE_GRANTED") {
+		quorum := n.calculateQuorum()
 		n.mu.Lock()
 		if n.Role == Candidate && n.CurrentTerm == term {
 			n.votesReceived++
-			quorum := n.calculateQuorum()
 			if n.votesReceived >= quorum {
 				n.Role = Leader
 				log.Printf("[Cluster] Yipiie! We received %d votes. We are the new LEADER for Term %d!\n", n.votesReceived, term)

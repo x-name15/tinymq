@@ -8,9 +8,16 @@ services:
     ports:
       - "${PORT:-7800}:7800"
       - "${TINYMQ_MQTT_PORT:-1883}:${TINYMQ_MQTT_PORT:-1883}"
-      - "${TINYMQ_CLUSTER_ADDR_PORT:-7901}:7901"
+      # Uncomment if running as a cluster node:
+      # - "${TINYMQ_CLUSTER_ADDR_PORT:-7901}:7901"
       - "${TINYMQ_NATS_PORT:-4222}:${TINYMQ_NATS_PORT:-4222}"
     volumes:
       - ./data:/home/tinymq/data
     restart: unless-stopped
     user: "10001:10001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7800/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

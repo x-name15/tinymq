@@ -3,6 +3,26 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.9.5] - 2026-06-29 — Native K8s Support
+
+### Fixed
+- **[Cluster] Deadlock on leader election**: `calculateQuorum()` attempted to acquire the write lock while `requestVoteFromPeer` already held it, permanently blocking the newly-elected leader from being proclaimed. Quorum is now computed before the mutex is taken.
+- **[Cluster] Node incorrectly added itself as a peer**: `loadPeersFromEnv()` compared the bind address (`0.0.0.0:7901`) against peer entries, which never matched DNS-based addresses (e.g. `tinymq-0.tinymq-headless:7901`), causing each node to treat itself as an external peer and skewing quorum counts. Self-filtering now uses `TINYMQ_CLUSTER_SELF` via `selfAddr()` (with `n.Address` as fallback).
+- **[Cluster] Bind address leaked into inter-node protocol messages**: `pingPeer()`, `sendHeartbeat()`, `startElection()`, `requestVoteFromPeer()`, and `requestSync()` were all announcing `0.0.0.0:7901` as the sender identity instead of the node's reachable address. This caused peer discovery rejections and votes being granted to an unresolvable address. All protocol messages now use `selfAddr()`, which resolves to `TINYMQ_CLUSTER_SELF` when set.
+- **[Cluster] TCP timeouts too short for orchestrated environments**: Gossip timeouts (500 ms) and vote request timeouts (1 s) were insufficient for DNS resolution latency at pod startup. Increased to 2 s and 3 s respectively. Election timeout range widened to 8–12 s to accommodate StatefulSet startup sequencing.
+
+### Added
+- **[Cluster] `selfAddr()` helper**: Internal method that returns the node's advertised address (`TINYMQ_CLUSTER_SELF`) with a fallback to the TCP bind address. Used consistently across all outbound protocol messages to decouple the bind address from the identity announced to peers. Required in Kubernetes where `0.0.0.0` is never a valid peer address; optional but harmless in local deployments.
+- **[Cluster] Kubernetes support**: New `TINYMQ_CLUSTER_SELF` environment variable lets a node advertise a reachable address to peers independently of its TCP bind address. When unset, behaviour is unchanged for local deployments.
+- **[K8s] Official Kubernetes manifest** (`k8s/tinymq-cluster.yaml`): StatefulSet with Headless Service, per-pod persistent volumes, and Secret-based cluster auth. `publishNotReadyAddresses: true` on the headless service ensures peer discovery works during rolling pod startup. Readiness and liveness probes added via `/healthz`.
+
+### Documentation
+- Expanded the Kubernetes deployment section in `DOCUMENTATION.md` with a full step-by-step guide, production-ready manifest reference, design decision notes, kind-based local testing instructions, and a troubleshooting table.
+- Added `TINYMQ_CLUSTER_SELF` to the clustering environment variable reference.
+- Clarified `TINYMQ_CLUSTER_REPLICATE_TIMEOUT` default (`500ms`) versus recommended value for orchestrated environments (`2s`).
+- Updated `docker-compose.yml` with a `/healthz` healthcheck and cluster port commented out by default.
+
+---
 ## [2.9.0] - 2026-06-26 — Native NATS Gateway, Cross-Transport Routing, some fixes and Repo Management
 
 ### Features & Transport
