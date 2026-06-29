@@ -7,6 +7,7 @@ metadata:
     app: tinymq
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true  # allows peer discovery during pod startup
   ports:
     - port: 7800
       name: http
@@ -28,9 +29,10 @@ spec:
     - port: 7800
       targetPort: 7800
       name: http
-    - port: 7901            
-      targetPort: 7901      
-      name: cluster
+    - port: 1883
+      targetPort: 1883
+      name: mqtt
+    # port 7901 intentionally omitted: internal P2P traffic only
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -58,35 +60,45 @@ spec:
         - containerPort: 7901
           name: cluster
         env:
-        # --- K8s Settings ---
         - name: POD_NAME
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
-        - name: TINYMQ_CLUSTER_HTTP_ADVERTISE
-          value: "$(POD_NAME).tinymq-headless:7800"
-        
-        # --- Clustering ---
         - name: TINYMQ_CLUSTER_ADDR
           value: "0.0.0.0:7901"
+        - name: TINYMQ_CLUSTER_SELF
+          value: "$(POD_NAME).tinymq-headless:7901"
+        - name: TINYMQ_CLUSTER_HTTP_ADVERTISE
+          value: "$(POD_NAME).tinymq-headless:7800"
         - name: TINYMQ_CLUSTER_NODES
           value: "tinymq-0.tinymq-headless:7901,tinymq-1.tinymq-headless:7901,tinymq-2.tinymq-headless:7901"
+        - name: TINYMQ_CLUSTER_REPLICATE_TIMEOUT
+          value: "2s"
         - name: TINYMQ_CLUSTER_SECRET
           valueFrom:
             secretKeyRef:
               name: tinymq-secrets
               key: cluster-secret
-        # --- MQTT ---
         - name: TINYMQ_MQTT_PORT
           value: "1883"
-        # --- Rate Limiting ---
         - name: TINYMQ_RATE_LIMIT
           value: "100"
-        
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 7800
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 7800
+          initialDelaySeconds: 15
+          periodSeconds: 10
         volumeMounts:
         - name: data-volume
           mountPath: /home/tinymq/data
-          
   volumeClaimTemplates:
   - metadata:
       name: data-volume

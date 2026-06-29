@@ -290,7 +290,7 @@ curl http://127.0.0.1:7800/healthz
 ```json
 {
   "status": "ok",
-  "version": "2.8.0",
+  "version": "2.9.5",
   "uptime_seconds": 3600
 }
 ```
@@ -299,7 +299,7 @@ curl http://127.0.0.1:7800/healthz
 ```json
 {
   "status": "ok",
-  "version": "2.8.0",
+  "version": "2.9.5",
   "uptime_seconds": 3600,
   "cluster_role": "leader",
   "cluster_term": 3
@@ -441,7 +441,7 @@ To activate clustering, configure the following keys in your `.env` file or envi
 * `TINYMQ_CLUSTER_NODES`: Comma-separated addresses of other cluster participants (e.g., `127.0.0.1:7902,127.0.0.1:7903`).
 * `TINYMQ_CLUSTER_SECRET`: **[SECURITY CRITICAL]** The HMAC-SHA256 secret key. **Warning:** If left empty, the cluster TCP port accepts connections from any peer without authentication, exposing your broker to arbitrary data injection!
 * `TINYMQ_CLUSTER_HTTP_ADVERTISE`: **[Routing]** The HTTP address advertised to followers for Reverse Proxy redirection (e.g., `192.168.1.10:7800`). Crucial for Docker NAT environments.
-* `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Custom timeout for Quorum acknowledgement (Default: `500ms`).
+* `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Custom timeout for Quorum acknowledgement (Default: `500ms`). Increase to `2s` or more in Kubernetes and other orchestrated environments where DNS resolution adds latency at pod startup.
 * `TINYMQ_CLUSTER_LEADER`: Set to `true` to declare a static, designated Leader node and disable automated election timeouts.
 
 ### Operational Verification
@@ -704,6 +704,7 @@ docker run -d \
 - `TINYMQ_CLUSTER_SECRET`: Shared secret used to sign and verify all intra-cluster TCP messages via HMAC-SHA256. If unset, communication is unauthenticated and peers are accepted without verification.
 - `TINYMQ_CLUSTER_HTTP_ADVERTISE`: The HTTP address this node advertises to followers for reverse proxying (e.g., `192.168.1.10:7800`). Required when the node's bind address is not reachable by peers directly (Docker bridge networks, NAT, etc.).
 - `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Timeout for each peer acknowledgment during quorum replication (default `500ms`). Accepts Go duration strings (e.g., `1s`, `200ms`).
+- `TINYMQ_CLUSTER_SELF`: The address this node advertises to peers as its own cluster identity (e.g., `192.168.1.10:7901`). Required when the TCP bind address (`TINYMQ_CLUSTER_ADDR`) is not reachable by other nodes — most commonly `0.0.0.0:7901` in Docker or Kubernetes. In Kubernetes, set this to `$(POD_NAME).tinymq-headless:7901` using the Downward API. When unset, the bind address is used as-is, which is correct for local deployments where all nodes share the same network.
 
 ### NATS gateway settings
 
@@ -712,16 +713,223 @@ docker run -d \
 
 ### Deploying to Kubernetes (Highly Available Cluster)
 
-TinyMQ is fully compatible with Kubernetes. Because TinyMQ uses a Write-Ahead Log (.log) and requires stable network identities to form a cluster, you must use a `StatefulSet` combined with a `Headless Service`.
+TinyMQ ships with a production-ready Kubernetes manifest (`k8s/tinymq-cluster.yaml`) that deploys a 3-node highly available cluster. Because TinyMQ uses a Write-Ahead Log (`.log`) and requires stable network identities for peer discovery, the manifest uses a `StatefulSet` combined with a `Headless Service`.
 
-We provide a ready-to-use manifest that deploys a 3-node cluster with persistent volumes:
+#### Prerequisites
 
-1. Apply the manifest:
-   `kubectl apply -f k8s/tinymq-cluster.yaml`
-2. Wait for the pods to initialize and elect a leader:
-   `kubectl get pods -l app=tinymq -w`
-3. Access the cluster by port-forwarding to any node:
-   `kubectl port-forward tinymq-0 7800:7800`
+- A running Kubernetes cluster (tested with [kind](https://kind.sigs.k8s.io/) locally and standard managed clusters)
+- `kubectl` configured and pointing at your target cluster
+- The TinyMQ image available to your cluster (see image note below)
+
+#### Step 1 — Create the cluster secret
+
+The HMAC secret used to authenticate intra-cluster TCP messages must be injected as a Kubernetes Secret. Never hardcode it in the manifest:
+
+```bash
+kubectl create secret generic tinymq-secrets \
+  --from-literal=cluster-secret=<your-strong-secret>
+```
+
+#### Step 2 — Apply the manifest
+
+```bash
+kubectl apply -f k8s/tinymq-cluster.yaml
+```
+
+#### Step 3 — Wait for leader election
+
+Pods start sequentially (`tinymq-0` → `tinymq-1` → `tinymq-2`). Watch until all three are `1/1 Running`:
+
+```bash
+kubectl get pods -l app=tinymq -w
+```
+
+To observe the election process in real-time:
+
+```bash
+kubectl logs -l app=tinymq -f --prefix --max-log-requests 3
+```
+
+A healthy startup looks like:
+
+```
+[Cluster] Node tinymq-1.tinymq-headless:7901 is now ONLINE
+[Cluster] Vote GRANTED to candidate tinymq-0.tinymq-headless:7901 for Term 1
+[Cluster] Yipiie! We received 2 votes. We are the new LEADER for Term 1!
+[Cluster] Stepping down to Follower. Recognized Leader: tinymq-0.tinymq-headless:7901
+```
+
+#### Step 4 — Access the cluster
+
+Port-forward to any node (followers automatically proxy writes to the leader):
+
+```bash
+kubectl port-forward pod/tinymq-0 7800:7800
+```
+
+```bash
+# Publish a message
+curl -X POST http://localhost:7800/publish/orders \
+  -H "Content-Type: application/json" \
+  -d '{"payload": "hello from k8s"}'
+
+# Consume from a different node to verify replication
+kubectl port-forward pod/tinymq-1 7801:7800
+curl "http://localhost:7801/consume/orders?peek=true"
+```
+
+#### Manifest reference (`k8s/tinymq-cluster.yaml`)
+
+```yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinymq-headless
+  labels:
+    app: tinymq
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true  # allows peer discovery during pod startup
+  ports:
+    - port: 7800
+      name: http
+    - port: 1883
+      name: mqtt
+    - port: 7901
+      name: cluster
+  selector:
+    app: tinymq
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinymq-service
+spec:
+  selector:
+    app: tinymq
+  ports:
+    - port: 7800
+      targetPort: 7800
+      name: http
+    - port: 1883
+      targetPort: 1883
+      name: mqtt
+    # port 7901 intentionally omitted: internal P2P traffic only
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tinymq
+spec:
+  serviceName: "tinymq-headless"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tinymq
+  template:
+    metadata:
+      labels:
+        app: tinymq
+    spec:
+      containers:
+      - name: tinymq
+        image: ghcr.io/x-name15/tinymq:latest
+        ports:
+        - containerPort: 7800
+          name: http
+        - containerPort: 1883
+          name: mqtt
+        - containerPort: 7901
+          name: cluster
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: TINYMQ_CLUSTER_ADDR
+          value: "0.0.0.0:7901"
+        - name: TINYMQ_CLUSTER_SELF
+          value: "$(POD_NAME).tinymq-headless:7901"
+        - name: TINYMQ_CLUSTER_HTTP_ADVERTISE
+          value: "$(POD_NAME).tinymq-headless:7800"
+        - name: TINYMQ_CLUSTER_NODES
+          value: "tinymq-0.tinymq-headless:7901,tinymq-1.tinymq-headless:7901,tinymq-2.tinymq-headless:7901"
+        - name: TINYMQ_CLUSTER_REPLICATE_TIMEOUT
+          value: "2s"
+        - name: TINYMQ_CLUSTER_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: tinymq-secrets
+              key: cluster-secret
+        - name: TINYMQ_MQTT_PORT
+          value: "1883"
+        - name: TINYMQ_RATE_LIMIT
+          value: "100"
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 7800
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 7800
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        volumeMounts:
+        - name: data-volume
+          mountPath: /home/tinymq/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data-volume
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+```
+
+#### Key design decisions
+
+- **`publishNotReadyAddresses: true`** on the Headless Service: ensures DNS records for all pods are registered immediately, even before their readiness probe passes. Without this, `tinymq-1` cannot resolve `tinymq-0.tinymq-headless` during the startup window and the first election fails.
+- **`TINYMQ_CLUSTER_SELF`**: set to the pod's own FQDN via the Downward API (`$(POD_NAME).tinymq-headless:7901`). TinyMQ binds on `0.0.0.0` but must announce a reachable identity to peers — without this, all protocol messages carry `0.0.0.0:7901` as the sender, causing peer discovery rejections and failed elections.
+- **`TINYMQ_CLUSTER_REPLICATE_TIMEOUT: 2s`**: the default `500ms` is too short for DNS resolution latency at pod startup in most managed clusters. Set to `2s` in the manifest; tune up for high-latency cross-zone deployments.
+- **Port 7901 omitted from `tinymq-service`**: the load-balanced Service only exposes HTTP and MQTT. Cluster TCP traffic flows exclusively through the Headless Service DNS entries and must never be exposed externally.
+
+#### Testing locally with kind
+
+[kind](https://kind.sigs.k8s.io/) (Kubernetes-in-Docker) lets you validate the full manifest on your machine before deploying to a managed cluster:
+
+```bash
+# Create a local cluster
+kind create cluster --name tinymq-test
+
+# Build and load the image (kind has no access to your local Docker daemon)
+docker build -t tinymq:dev .
+kind load docker-image tinymq:dev --name tinymq-test
+
+# In the manifest, set image: tinymq:dev and imagePullPolicy: Never for local testing
+
+# Create the secret and apply
+kubectl create secret generic tinymq-secrets --from-literal=cluster-secret=local-test-secret
+kubectl apply -f k8s/tinymq-cluster.yaml
+
+# Clean up when done
+kind delete cluster --name tinymq-test
+```
+
+#### Troubleshooting
+
+| Symptom | Command | Likely cause |
+|---|---|---|
+| Pods stuck in `Pending` | `kubectl describe pod tinymq-0` | No PVC provisioner available |
+| `CrashLoopBackOff` | `kubectl logs tinymq-0 --previous` | Bad env var or secret missing |
+| Election loop (`Leader timeout!` repeating) | `kubectl logs -l app=tinymq \| grep -E "Election\|VOTE\|ONLINE"` | DNS not resolving between pods; check `publishNotReadyAddresses` |
+| `SEC-ALERT: Invalid HMAC` | `kubectl logs tinymq-0 \| grep SEC-ALERT` | Secret mismatch between pods |
+| TCP connectivity | `kubectl exec -it tinymq-0 -- nc -zv tinymq-1.tinymq-headless 7901` | NetworkPolicy blocking port 7901 |
 
 
 ### Persistent data (Docker Compose)
@@ -731,19 +939,27 @@ TinyMQ writes WAL `.log` files into `/home/tinymq/data` inside the container. Mo
 ```yaml
 services:
   tinymq:
-    image: ghcr.io/x-name15/tinymq:latest   # use pre-built image; replace with build: . to build from source
+    build: .
+    image: tinymq:latest
     container_name: tinymq
     env_file:
       - .env
     ports:
       - "${PORT:-7800}:7800"
       - "${TINYMQ_MQTT_PORT:-1883}:${TINYMQ_MQTT_PORT:-1883}"
-      # Uncomment the line below if running as a cluster node:
+      # Uncomment if running as a cluster node:
       # - "${TINYMQ_CLUSTER_ADDR_PORT:-7901}:7901"
+      - "${TINYMQ_NATS_PORT:-4222}:${TINYMQ_NATS_PORT:-4222}"
     volumes:
       - ./data:/home/tinymq/data
     restart: unless-stopped
     user: "10001:10001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7800/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 ```
 
 > **Permissions note:** TinyMQ runs as an unprivileged user (`UID 10001`). Before starting, ensure the mounted directory is writable:
