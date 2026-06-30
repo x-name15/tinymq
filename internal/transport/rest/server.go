@@ -758,7 +758,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 			role = "leader"
 		}
 		res["cluster_role"] = role
-		res["cluster_term"] = s.clusterNode.CurrentTerm
+		res["cluster_term"] = s.clusterNode.GetCurrentTerm()
 	}
 
 	w.WriteHeader(http.StatusOK)

@@ -169,29 +169,31 @@ func (c *Client) Subscribe(ctx context.Context, topic string, options Subscripti
 			} else {
 				fmt.Printf("[SDK Resilience] Handler Failed: %v.\n", err)
 				fmt.Printf("[SDK Resilience] Re-queuing message %s to preserve...\n", msg.ID)
-
-				ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, safeTopic, safeMsgID)
-				ackReq, _ := http.NewRequest(http.MethodPost, ackURL, nil)
-				ackReq.Header.Set("Content-Type", "application/json")
-				c.authorize(ackReq)
-
-				if ackResp, ackErr := c.httpClient.Do(ackReq); ackErr == nil {
-					ackResp.Body.Close()
-				}
-
+				
 				msgData, _ := json.Marshal(msg)
 				requeueURL := fmt.Sprintf("%s/requeue", c.baseURL)
 				reqReq, _ := http.NewRequest(http.MethodPost, requeueURL, bytes.NewBuffer(msgData))
 				reqReq.Header.Set("Content-Type", "application/json")
 				c.authorize(reqReq)
-
+				requeueOK := false
 				if reqResp, reqErr := c.httpClient.Do(reqReq); reqErr == nil {
+					requeueOK = reqResp.StatusCode == http.StatusAccepted
 					reqResp.Body.Close()
 				}
-
+				if requeueOK {
+					ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, safeTopic, safeMsgID)
+					ackReq, _ := http.NewRequest(http.MethodPost, ackURL, nil)
+					ackReq.Header.Set("Content-Type", "application/json")
+					c.authorize(ackReq)
+					if ackResp, ackErr := c.httpClient.Do(ackReq); ackErr == nil {
+						ackResp.Body.Close()
+					}
+				} else {
+					fmt.Printf("[SDK Resilience] Requeue failed for message %s, leaving original unacknowledged.\n", msg.ID)
+				}
 				fmt.Printf("[SDK Resilience] Sleeping worker for %v before next attempt...\n", currentBackoff)
 				time.Sleep(currentBackoff)
-
+				
 				currentBackoff *= 2
 				if currentBackoff > maxBackoff {
 					currentBackoff = maxBackoff

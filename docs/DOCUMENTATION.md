@@ -685,6 +685,7 @@ docker run -d \
 - `TINYMQ_MAX_MESSAGES`: Maximum number of messages held in RAM per topic (default `100000`).
 - `TINYMQ_API_KEY`: Secures the broker. If set, all endpoints (including the Dashboard) will require an `Authorization: Bearer <token>` HTTP header.
 - `TINYMQ_RATE_LIMIT`: Per-IP request rate limit for authenticated REST routes, in requests per second. Set to a positive value to enable throttling.
+- `TINYMQ_TRUST_PROXY_HEADERS`: Set to `true` to make the rate limiter trust the `X-Real-IP` header for per-IP identification. Only enable this when TinyMQ runs behind a trusted reverse proxy that sets this header itself — otherwise clients can spoof it to bypass rate limiting entirely. Defaults to `false`, which uses the real TCP connection address.
 - `TINYMQ_TLS_CERT`: Path to the TLS certificate file for the REST server. If unset, TinyMQ stays on plain HTTP.
 - `TINYMQ_TLS_KEY`: Path to the TLS private key file for the REST server. TLS is enabled only when this and `TINYMQ_TLS_CERT` are both set.
 - `TINYMQ_MAX_TOPICS`: Limits the maximum number of unique topics/queues allowed in memory (default `10000`) to protect against DoS attacks.

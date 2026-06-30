@@ -116,8 +116,10 @@ func getRateLimitFromEnv() float64 {
 }
 
 func extractIP(r *http.Request) string {
-	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-		return realIP
+	if os.Getenv("TINYMQ_TRUST_PROXY_HEADERS") == "true" {
+		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+			return realIP
+		}
 	}
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

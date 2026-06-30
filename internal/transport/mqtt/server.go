@@ -308,14 +308,18 @@ func (s *Server) handleSubscribe(mc *mqttConn, payload []byte, spies map[string]
 
 		cleanTopic := translateMQTTWildcard(topic)
 		log.Printf("[MQTT] Client subscribing to '%s' (QoS: %d, translated to '%s')", topic, requestedQoS, cleanTopic)
-
+		if oldCh, exists := spies[cleanTopic]; exists {
+			s.broker.RemoveSpy(cleanTopic, oldCh)
+			delete(spies, cleanTopic)
+		}
+		
 		spyChan, err := s.broker.AddSpy(cleanTopic)
 		if err != nil {
 			log.Printf("[MQTT] Broker rejected subscription to '%s': %v", cleanTopic, err)
 			grantedQoS = append(grantedQoS, 0x80)
 			continue
 		}
-
+		
 		spies[cleanTopic] = spyChan
 		grantedQoS = append(grantedQoS, 0x00)
 

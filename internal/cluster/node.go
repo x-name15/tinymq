@@ -281,14 +281,17 @@ func (n *Node) handlePeer(conn net.Conn) {
 			candidateTerm := 0
 			fmt.Sscanf(parts[1], "%d", &candidateTerm)
 			candidateAddr := parts[2]
-
+			
 			allowed := n.evaluateVote(candidateTerm, candidateAddr)
+			n.mu.RLock()
+			currentTerm := n.CurrentTerm
+			n.mu.RUnlock()
 			if allowed {
-				voteBody := fmt.Sprintf("VOTE_GRANTED %d", n.CurrentTerm)
+				voteBody := fmt.Sprintf("VOTE_GRANTED %d", currentTerm)
 				voteMac := n.signMessage(voteBody)
 				fmt.Fprintf(conn, "%s %s\n", voteBody, voteMac)
 			} else {
-				fmt.Fprintf(conn, "VOTE_DENIED %d\n", n.CurrentTerm)
+				fmt.Fprintf(conn, "VOTE_DENIED %d\n", currentTerm)
 			}
 
 		case "BIND_GROUP":
@@ -679,6 +682,12 @@ func (n *Node) IsLeader() bool {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.Role == Leader
+}
+
+func (n *Node) GetCurrentTerm() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.CurrentTerm
 }
 
 func (n *Node) GetLeaderHTTP() string {

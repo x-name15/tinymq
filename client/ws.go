@@ -26,6 +26,12 @@ type WSClient struct {
 	mu      sync.Mutex
 }
 
+type wsCommand struct {
+	Action  string `json:"action"`
+	Topic   string `json:"topic,omitempty"`
+	Payload string `json:"payload,omitempty"`
+}
+
 func NewWSClient(baseURL string, apiKey ...string) *WSClient {
 	wsURL := strings.Replace(baseURL, "http://", "ws://", 1)
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
@@ -166,8 +172,11 @@ func (c *WSClient) readFrame() ([]byte, error) {
 }
 
 func (c *WSClient) Subscribe(topic string, handler func(message.Message)) error {
-	subMsg := fmt.Sprintf(`{"action":"subscribe","topic":"%s"}`, topic)
-	if err := c.writeFrame(subMsg); err != nil {
+	subMsg, err := json.Marshal(wsCommand{Action: "subscribe", Topic: topic})
+	if err != nil {
+		return err
+	}
+	if err := c.writeFrame(string(subMsg)); err != nil {
 		return err
 	}
 
@@ -198,7 +207,10 @@ func (c *WSClient) Subscribe(topic string, handler func(message.Message)) error 
 }
 
 func (c *WSClient) Publish(topic string, payload []byte) error {
-	safePayload := strings.ReplaceAll(string(payload), "\"", "\\\"")
-	pubMsg := fmt.Sprintf(`{"action":"publish","topic":"%s","payload":"%s"}`, topic, safePayload)
-	return c.writeFrame(pubMsg)
+	pubMsg, err := json.Marshal(wsCommand{Action: "publish", Topic: topic, Payload: string(payload)})
+	if err != nil {
+		return err
+	}
+	
+	return c.writeFrame(string(pubMsg))
 }

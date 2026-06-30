@@ -3,6 +3,21 @@
 All notable changes of the proyect will be documented on this file.
 
 ---
+## [2.9.5] - 2026-06-29 — Cluster Consensus & NATS Transport Hardening
+
+### Added
+- **REST:** New `TINYMQ_TRUST_PROXY_HEADERS` environment variable to control whether the rate limiter trusts the `X-Real-IP` header. Defaults to `false` (uses the real TCP connection address). Documented in `.env.example` and `DOCUMENTATION.md`.
+
+### Fixed
+- **Cluster:** Fixed a data race in `Node.handlePeer()` (`REQUEST_VOTE` case) where `n.CurrentTerm` was read without synchronization after `evaluateVote()`, racing with writes protected by `n.mu.Lock()` in `startElection()` and `handleHeartbeat()`. The term is now snapshotted under `RLock` before building the `VOTE_GRANTED`/`VOTE_DENIED` response.
+- **NATS:** Fixed a short-read bug in `Server.handlePub()` that used `reader.Read(payload)` instead of `io.ReadFull()`, which could truncate large or fragmented payloads and desync the NATS protocol parser on the next line read.
+- **MQTT:** Fixed a goroutine leak and broker memory leak in `Server.handleSubscribe()`: re-subscribing to the same topic overwrote `spies[cleanTopic]` without calling `RemoveSpy()` on the previous channel, leaving the old dispatch goroutine and its `Topic.spies` registration orphaned indefinitely, even after client disconnect.
+- **REST:** Fixed a rate-limit bypass vulnerability in `extractIP()` (`internal/transport/rest/ratelimit.go`), where the `X-Real-IP` header was trusted unconditionally. Any client could spoof a different `X-Real-IP` per request to evade per-IP rate limiting entirely and inflate the `ipRateLimiter` bucket map. The header is now only trusted when `TINYMQ_TRUST_PROXY_HEADERS=true` is explicitly set; otherwise the connection's real `RemoteAddr` is used.
+- **Broker:** Fixed a DLQ-bypass bug in `Broker.Requeue()`: `msg.RetryCount` comes directly from client-supplied JSON in `POST /requeue` with no validation. A negative value (e.g. `-1000`) prevented the counter from ever reaching the dead-letter threshold, letting poison messages bounce indefinitely in the live queue instead of being routed to `.dlq`. The count is now clamped to a minimum of `0` before incrementing.
+- **REST/Cluster:** Fixed a data race in `handleHealthz()` (`internal/transport/rest/server.go`), which read the exported field `Node.CurrentTerm` directly without synchronization, racing with writes under `n.mu.Lock()` in `startElection()`, `evaluateVote()`, and `handleHeartbeat()`. Added `Node.GetCurrentTerm()` as a thread-safe accessor and updated the `/healthz` handler to use it.
+- **SDK (golang):** Fixed a message-loss bug in `Client.Subscribe()` (`client/client.go`): on handler failure, the SDK acknowledged the original message *before* confirming the `/requeue` call succeeded. If `/requeue` failed (network blip, broker restart), the message was permanently lost despite the "SDK Resilience" retry path being designed to prevent exactly that. The order is now reversed: ack only fires after a confirmed `202 Accepted` from `/requeue`.
+- **SDK (golang):** Fixed unsafe manual JSON construction in `WSClient.Subscribe()` and `WSClient.Publish()` (`client/ws.go`). Topic names were never escaped and payload escaping only handled double quotes, allowing malformed or injected JSON when topics/payloads contained quotes, backslashes, or control characters. Both methods now use `json.Marshal` with a `wsCommand` struct.
+---
 ## [2.9.5] - 2026-06-29 — Native K8s Support
 
 ### Fixed
