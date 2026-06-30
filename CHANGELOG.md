@@ -1,6 +1,61 @@
 # Changelog
 
 All notable changes of the proyect will be documented on this file.
+---
+## [3.0.0] - 2026-06-30 — Dashboard Redesign, UX Improvements & i18n Support
+
+### Added
+
+#### Dashboard
+- Complete visual redesign of the embedded web dashboard (`/dashboard`) with:
+  - New topbar layout.
+  - Refined metric cards.
+  - Monospace data styling.
+  - Softer light/dark color palette built entirely on CSS variables.
+- Language switcher (🇪🇸 Spanish / 🇬🇧 English) with automatic browser-language detection on first load and `localStorage` persistence. Switching languages requires no page reload.
+- New **DLQ Queues** metric card, computed client-side from the existing `/api/stats` response (no broker API changes required).
+- Command palette (`⌘K`) for quickly searching queues and triggering actions (publish, consume, peek and tail) entirely from the keyboard.
+- Real-time broker health monitoring via periodic `/healthz` checks, displaying **Online**, **Checking**, or **Offline** status.
+- Sortable queue table (queue name, waiting consumers and messages in RAM), with sorting preferences persisted in `localStorage`.
+- Custom confirmation dialogs for destructive actions (purge and delete), replacing native browser `confirm()` prompts.
+- Skeleton loading states for Consume, Peek and Webhooks modals.
+- Locale-aware number formatting across dashboard metrics and tables.
+- JSON syntax highlighting for Peek and Consume views using pure CSS.
+- Queue names now truncate with ellipsis while preserving the full name via tooltip on hover.
+- Toast notifications now stack without overlapping.
+- New keyboard shortcuts:
+  - `⌘K` — Toggle command palette
+  - `/` — Focus queue search
+  - `Esc` — Close any modal or the command palette
+- Improved animations, including:
+  - Queue row fade-in during auto-refresh.
+  - Modal entrance transitions.
+  - Toast enter/exit animations.
+- Refined hover and focus states across both light and dark themes.
+
+#### Internationalization (i18n)
+- Translation strings extracted into `internal/transport/rest/static/{es,en}.json`.
+- Translation files are fetched lazily, cached in memory, and resolved through a unified `t(key)` helper.
+- Adding a new language now only requires dropping a new `<lang>.json` file into `static/`; no Go code changes are necessary.
+- Added 25+ new translation keys covering health status, command palette, confirmation dialogs, queue creation and error messages.
+
+#### REST
+- Added a new `/static/` endpoint serving embedded assets through `go:embed`, protected by the same `withAuth` middleware as `/dashboard`.
+
+### Changed
+
+#### Dashboard
+- Auto-refresh now pauses while any modal or the command palette is open, resuming automatically when closed.
+- Health badge updates dynamically without requiring a page refresh.
+- Queue sorting and filtering are now performed entirely client-side using cached statistics, eliminating unnecessary API requests.
+- Theme toggle redesigned from a checkbox slider to a single icon button (🌙 / ☀️).
+- All UI text previously hardcoded in JavaScript now resolves through the centralized `t(key)` translation helper.
+
+### Notes
+
+- No changes were made to the broker core, REST API contracts, WAL format or cluster protocol. This release is entirely focused on the dashboard and user experience.
+- Although the version was bumped to **3.0.0**, there are **no breaking API or protocol changes**. The major version reflects the complete dashboard rewrite and significant UX improvements.
+- The project philosophy remains unchanged: **zero external dependencies**, **single binary**, and **pure Go standard library**. All static assets are embedded into the binary at build time via `go:embed`.
 
 ---
 ## [2.9.5] - 2026-06-29 — Cluster Consensus & NATS Transport Hardening

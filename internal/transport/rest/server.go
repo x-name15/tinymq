@@ -42,6 +42,9 @@ var proxyTransport = &http.Transport{
 var dashboardFS embed.FS
 var compiledDashboardTemplate = template.Must(template.ParseFS(dashboardFS, "dashboard.html"))
 
+//go:embed static
+var staticFS embed.FS
+
 type Server struct {
 	broker      *broker.Broker
 	httpServer  *http.Server
@@ -75,6 +78,7 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 
 	// ── Routes with Auth (read-only, no proxy needed) ─────────────────
 	mux.HandleFunc("/dashboard", s.withAuth(s.handleDashboard))
+	mux.Handle("/static/", s.withAuth(http.FileServerFS(staticFS).ServeHTTP))
 	mux.HandleFunc("/metrics", s.withAuth(s.handleMetrics))
 
 	mux.HandleFunc("/api/stats", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
