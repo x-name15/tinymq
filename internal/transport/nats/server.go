@@ -213,32 +213,32 @@ func (s *Server) handlePub(nc *natsConn, fields []string, reader *bufio.Reader) 
 
 	subject := fields[1]
 	sizeStr := strings.TrimSpace(fields[2])
-	
+
 	size, err := strconv.Atoi(sizeStr)
 	if err != nil || size < 0 {
 		return fmt.Errorf("PUB invalid byte count: %s", sizeStr)
 	}
-	
+
 	const maxPayload = 2 << 20
 	if size > maxPayload {
 		return fmt.Errorf("PUB payload exceeds maximum size (%d bytes)", maxPayload)
 	}
-	
+
 	topic := translateSubject(subject)
 	if !s.broker.IsValidTopicName(topic) {
 		return fmt.Errorf("PUB invalid subject: %s", subject)
 	}
-	
+
 	payload := make([]byte, size)
 	if size > 0 {
 		if _, err := io.ReadFull(reader, payload); err != nil {
 			return fmt.Errorf("PUB failed to read payload: %w", err)
 		}
 	}
-	
+
 	reader.ReadString('\n')
 	log.Printf("[NATS] PUB %s (%d bytes)\n", subject, size)
-	
+
 	if err := s.broker.Publish(topic, payload, nil, "normal", nil, nil, false); err != nil {
 		log.Printf("[NATS] Broker rejected PUB on '%s': %v\n", topic, err)
 		return err

@@ -281,7 +281,7 @@ func (n *Node) handlePeer(conn net.Conn) {
 			candidateTerm := 0
 			fmt.Sscanf(parts[1], "%d", &candidateTerm)
 			candidateAddr := parts[2]
-			
+
 			allowed := n.evaluateVote(candidateTerm, candidateAddr)
 			n.mu.RLock()
 			currentTerm := n.CurrentTerm

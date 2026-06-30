@@ -211,6 +211,6 @@ func (c *WSClient) Publish(topic string, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	
+
 	return c.writeFrame(string(pubMsg))
 }

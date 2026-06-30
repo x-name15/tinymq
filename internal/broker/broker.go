@@ -619,10 +619,10 @@ func (b *Broker) Requeue(msg message.Message) {
 	if msg.RetryCount < 0 {
 		msg.RetryCount = 0
 	}
-	
+
 	msg.RetryCount++
 	targetTopic := msg.Topic
-	
+
 	if msg.RetryCount >= 3 {
 		targetTopic = msg.Topic + ".dlq"
 		msg.Topic = targetTopic

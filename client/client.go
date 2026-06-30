@@ -169,7 +169,7 @@ func (c *Client) Subscribe(ctx context.Context, topic string, options Subscripti
 			} else {
 				fmt.Printf("[SDK Resilience] Handler Failed: %v.\n", err)
 				fmt.Printf("[SDK Resilience] Re-queuing message %s to preserve...\n", msg.ID)
-				
+
 				msgData, _ := json.Marshal(msg)
 				requeueURL := fmt.Sprintf("%s/requeue", c.baseURL)
 				reqReq, _ := http.NewRequest(http.MethodPost, requeueURL, bytes.NewBuffer(msgData))
@@ -193,7 +193,7 @@ func (c *Client) Subscribe(ctx context.Context, topic string, options Subscripti
 				}
 				fmt.Printf("[SDK Resilience] Sleeping worker for %v before next attempt...\n", currentBackoff)
 				time.Sleep(currentBackoff)
-				
+
 				currentBackoff *= 2
 				if currentBackoff > maxBackoff {
 					currentBackoff = maxBackoff
