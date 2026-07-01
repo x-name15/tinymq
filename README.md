@@ -133,14 +133,6 @@ Access the dashboard at: **http://localhost:7800/dashboard**
 
 TinyMQ is licensed under the GPL v3. See [`LICENSE`](./LICENSE) for details.
 
-## Contributions
-
-Found a bug or want to improve TinyMQ? We'd love your help!
-
-1. Fork the repo
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Open a Pull Request
-
 ### Credits
 
 **Author:** Mr Jacket / Felix Manrique
