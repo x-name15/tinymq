@@ -264,6 +264,75 @@ curl -X POST http://127.0.0.1:7800/api/topics \
 - `policy` (`reject` | `drop-oldest`): Overflow behavior. Defaults to `TINYMQ_DEFAULT_POLICY`.
 - `retain` (e.g. `2h`, `30m`): Automatic TTL applied to every incoming message on this topic. Messages published with an explicit `?ttl=` override this value.
 
+### Create/List Consumer Groups Explicitly
+
+**Endpoint:** `POST /api/groups` | `GET /api/groups?topic={topic}`
+
+Consumer Groups can be created implicitly via `?group=` on `/consume/{topic}` (see above), or explicitly pre-registered/inspected through this endpoint — useful for provisioning groups ahead of time or auditing which groups exist on a topic.
+
+```bash
+# Register a consumer group binding for a topic
+curl -X POST http://127.0.0.1:7800/api/groups \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "orders.eu", "group": "emails"}'
+```
+
+**Response:** `201 Created`
+```json
+{
+  "status": "created",
+  "virtual_topic": "orders.eu::emails"
+}
+```
+
+```bash
+# List all groups currently bound to a topic
+curl "http://127.0.0.1:7800/api/groups?topic=orders.eu"
+```
+
+**Response:** `200 OK`
+```json
+{
+  "topic": "orders.eu",
+  "groups": ["emails", "invoices"]
+}
+```
+
+> **Note:** In cluster mode, `POST /api/groups` is proxied to the leader (group creation triggers replication), while `GET /api/groups` resolves locally on whichever node receives the request.
+
+### Cluster Status
+
+**Endpoint:** `GET /api/cluster/status`
+
+Returns this node's cluster role, current Raft-style term, recognized leader address, and the health of its known peers. Unlike most write endpoints, this one is **not** proxied to the leader — it intentionally reports the querying node's own local view, which is what you need when diagnosing a split-brain or a stuck election.
+
+```bash
+curl http://127.0.0.1:7800/api/cluster/status
+```
+
+**Response (clustering enabled):**
+```json
+{
+  "clustering_enabled": true,
+  "role": "leader",
+  "term": 3,
+  "leader_http": "127.0.0.1:7800",
+  "peers": [
+    { "address": "10.0.1.5:7946", "alive": true, "last_seen": "2026-07-01T10:00:00Z" },
+    { "address": "10.0.1.6:7946", "alive": false, "last_seen": "2026-07-01T09:58:12Z" }
+  ]
+}
+```
+
+**Response (standalone mode):**
+```json
+{
+  "clustering_enabled": false
+}
+```
+
+> `role` can be `"leader"`, `"follower"`, or `"candidate"` (mid-election). This is the same role classification now used internally by `/healthz`'s `cluster_role` field.
+
 ### Inspect Messages (Peek)
 **Endpoint:** `GET /api/queues/peek?queue={topic}&limit={count}`
 Safely inspects up to `limit` messages in RAM without consuming or deleting them.
@@ -474,8 +543,8 @@ To protect the host environment from Out-Of-Memory (OOM) crashes and DoS attacks
 **Option A — Download a pre-built binary (recommended)**
 
 Go to the [GitHub Releases page](https://github.com/x-name15/tinymq/releases) and download the binary for your platform:
-> **Keep in MInd:** tmq CLI is bundled with the Broker Server on releases page.
 
+> **Keep in MInd:** tmq CLI is bundled with the Broker Server on releases page.
 | Platform              | File                            |
 |-----------------------|---------------------------------|
 | Linux (amd64)         | `tinymq-linux-amd64.tar.gz`    |
@@ -517,10 +586,18 @@ tmq top                 # Opens a live, auto-refreshing dashboard in your termin
 tmq shell               # Opens an interactive REPL session (tinymq> prompt)
 
 # Queue operations
+tmq create <topic> [--policy=reject|drop-oldest] [--retention=duration] # Explicitly provisions a queue
 tmq pub <topic> <data>  # Publishes a message (--ttl, --delay, --broadcast)
 tmq sub <topic>         # Consumes messages (--timeout, --limit, --auto-ack)
 tmq peek <topic> [--limit=N]  # Inspects messages in RAM without consuming
 tmq tail <topic>        # Zero-latency live stream monitoring (SSE)
+
+# Consumer groups
+tmq group create <topic> <group> # Registers a named consumer group binding for a topic
+tmq group list <topic>  # Lists consumer groups bound to a topic
+# Cluster
+tmq cluster status       # Shows this node's role, term, leader, and peer health
+tmq cluster peers [--watch] # Same view focused on peers; --watch refreshes every 2s (e.g. for watching a failover live)
 
 # Administration
 tmq rm <topic>          # Completely deletes a topic and its .log file
@@ -535,6 +612,7 @@ tmq bench <topic> --protocol=nats --target=127.0.0.1:40104 # Runs an ultra-fast 
 tmq backup              # Compresses the ./data folder (--format=zip|tar)
 ```
 
+> **Note:** `tmq cluster status`/`tmq cluster peers` only return useful data when the connected broker is running with clustering enabled (`TINYMQ_CLUSTER_SECRET` / `TINYMQ_CLUSTER_NODES` set). Against a standalone node, they report `Clustering is not enabled on this node (standalone mode).`
 ---
 
 ## Go SDK integration (advanced)

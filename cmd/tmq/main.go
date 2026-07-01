@@ -54,6 +54,19 @@ type CLIMessage struct {
 	RetryCount int       `json:"retry_count"`
 }
 
+type ClusterPeer struct {
+	Address  string    `json:"address"`
+	Alive    bool      `json:"alive"`
+	LastSeen time.Time `json:"last_seen"`
+}
+type ClusterStatusResponse struct {
+	ClusteringEnabled bool          `json:"clustering_enabled"`
+	Role              string        `json:"role"`
+	Term              int           `json:"term"`
+	LeaderHTTP        string        `json:"leader_http"`
+	Peers             []ClusterPeer `json:"peers"`
+}
+
 func doAuthRequest(method, urlStr string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(method, urlStr, body)
 	if err != nil {
@@ -110,6 +123,10 @@ func main() {
 		handleTop(baseURL)
 	case "shell":
 		handleShell(baseURL)
+	case "cluster":
+		handleCluster(baseURL, os.Args[2:])
+	case "create":
+		handleCreate(baseURL, os.Args[2:])
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -737,6 +754,53 @@ func handleRm(baseURL string, args []string, isPurge bool) {
 	}
 }
 
+func handleCreate(baseURL string, args []string) {
+	createCmd := flag.NewFlagSet("create", flag.ExitOnError)
+	policy := createCmd.String("policy", "", "Queue policy: reject|drop-oldest (default: server's TINYMQ_DEFAULT_POLICY)")
+	retention := createCmd.String("retention", "", "Message retention (e.g., 24h, 30m)")
+	createCmd.Parse(args)
+	rest := createCmd.Args()
+	if len(rest) < 1 {
+		fmt.Println("Use: tmq create <topic> [--policy=reject|drop-oldest] [--retention=duration]")
+		return
+	}
+	topic := rest[0]
+	payload := map[string]string{"name": topic}
+	if *policy != "" {
+		if *policy != "reject" && *policy != "drop-oldest" {
+			fmt.Printf("%s[Error] --policy must be 'reject' or 'drop-oldest'%s\n", colorRed, colorReset)
+			return
+		}
+		payload["policy"] = *policy
+	}
+	if *retention != "" {
+		if _, err := time.ParseDuration(*retention); err != nil {
+			fmt.Printf("%s[Error] --retention must be a valid Go duration (e.g. 24h, 30m): %v%s\n", colorRed, err, colorReset)
+			return
+		}
+		payload["retain"] = *retention
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := doAuthRequest(http.MethodPost, baseURL+"/api/topics", bytes.NewBuffer(body))
+	if err != nil {
+		fmt.Printf("%s[Error] %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusCreated {
+		fmt.Printf("%s✔ Queue '%s' created!%s\n", colorGreen, topic, colorReset)
+		if *policy != "" {
+			fmt.Printf("  Policy: %s\n", *policy)
+		}
+		if *retention != "" {
+			fmt.Printf("  Retention: %s\n", *retention)
+		}
+	} else {
+		b, _ := io.ReadAll(resp.Body)
+		fmt.Printf("%s[Error] %s%s\n", colorRed, string(b), colorReset)
+	}
+}
+
 func handleWebhook(baseURL string, args []string) {
 	if len(args) < 2 {
 		fmt.Println("Use: tmq webhook list <topic>\n    tmq webhook add <topic> <url>")
@@ -781,6 +845,62 @@ func handleWebhook(baseURL string, args []string) {
 		}
 	} else {
 		fmt.Println("Invalid webhook command.")
+	}
+}
+
+func handleGroup(baseURL string, args []string) {
+	if len(args) < 2 {
+		fmt.Println("Use: tmq group list <topic>\n    tmq group create <topic> <group>")
+		return
+	}
+	action, topic := args[0], args[1]
+	switch action {
+	case "list":
+		u := fmt.Sprintf("%s/api/groups?topic=%s", baseURL, url.QueryEscape(topic))
+		resp, err := doAuthRequest(http.MethodGet, u, nil)
+		if err != nil {
+			fmt.Printf("%s[Error] %v%s\n", colorRed, err, colorReset)
+			return
+		}
+		defer resp.Body.Close()
+		var result struct {
+			Topic  string   `json:"topic"`
+			Groups []string `json:"groups"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			fmt.Printf("%s[Error] Could not parse response: %v%s\n", colorRed, err, colorReset)
+			return
+		}
+		fmt.Printf("\n%sConsumer groups for '%s':%s\n", colorBold+colorCyan, topic, colorReset)
+		if len(result.Groups) == 0 {
+			fmt.Println("  (No groups registered)")
+		} else {
+			for _, g := range result.Groups {
+				fmt.Printf("  - %s\n", g)
+			}
+		}
+		fmt.Println()
+	case "create":
+		if len(args) < 3 {
+			fmt.Println("Use: tmq group create <topic> <group>")
+			return
+		}
+		group := args[2]
+		body, _ := json.Marshal(map[string]string{"topic": topic, "group": group})
+		resp, err := doAuthRequest(http.MethodPost, baseURL+"/api/groups", bytes.NewBuffer(body))
+		if err != nil {
+			fmt.Printf("%s[Error] %v%s\n", colorRed, err, colorReset)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusCreated {
+			fmt.Printf("%s✔ Consumer group '%s' created for topic '%s'!%s\n", colorGreen, group, topic, colorReset)
+		} else {
+			b, _ := io.ReadAll(resp.Body)
+			fmt.Printf("%s[Error] %s%s\n", colorRed, string(b), colorReset)
+		}
+	default:
+		fmt.Println("Invalid group command.")
 	}
 }
 
@@ -957,16 +1077,99 @@ func restoreFromZip(filename, dataDir string) error {
 	return nil
 }
 
+func handleCluster(baseURL string, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Use: tmq cluster status\n    tmq cluster peers [--watch]")
+		return
+	}
+	switch args[0] {
+	case "status":
+		printClusterStatus(baseURL)
+	case "peers":
+		peersCmd := flag.NewFlagSet("peers", flag.ExitOnError)
+		watch := peersCmd.Bool("watch", false, "Continuously refresh the peer table every 2s")
+		peersCmd.Parse(args[1:])
+		if *watch {
+			for {
+				fmt.Print("\033[H\033[2J")
+				printClusterStatus(baseURL)
+				fmt.Printf("\n%s(Refreshing every 2s. Press Ctrl+C to exit)%s\n", colorYellow, colorReset)
+				time.Sleep(2 * time.Second)
+			}
+		}
+		printClusterStatus(baseURL)
+	default:
+		fmt.Println("Use: tmq cluster status\n    tmq cluster peers [--watch]")
+	}
+}
+
+func printClusterStatus(baseURL string) {
+	resp, err := doAuthRequest(http.MethodGet, baseURL+"/api/cluster/status", nil)
+	if err != nil {
+		fmt.Printf("%s[Error] Error connecting to the broker at %s: %v%s\n", colorRed, baseURL, err, colorReset)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Printf("%s[Error] Unauthorized. Ensure TINYMQ_API_KEY is correctly set.%s\n", colorRed, colorReset)
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var status ClusterStatusResponse
+	if err := json.Unmarshal(body, &status); err != nil {
+		fmt.Printf("%s[Error] Could not parse cluster status response: %v%s\n", colorRed, err, colorReset)
+		return
+	}
+	if !status.ClusteringEnabled {
+		fmt.Println("Clustering is not enabled on this node (standalone mode).")
+		return
+	}
+	roleColor := colorGreen
+	if status.Role == "candidate" {
+		roleColor = colorYellow
+	} else if status.Role == "follower" {
+		roleColor = colorBlue
+	}
+	fmt.Printf("\n%sTINYMQ CLUSTER STATUS (%s)%s\n\n", colorBold+colorCyan, baseURL, colorReset)
+	fmt.Printf("Role:  %s%s%s\n", roleColor, status.Role, colorReset)
+	fmt.Printf("Term:  %d\n", status.Term)
+	if status.Role != "leader" {
+		leaderStr := status.LeaderHTTP
+		if leaderStr == "" {
+			leaderStr = colorYellow + "unknown (electing)" + colorReset
+		}
+		fmt.Printf("Leader: %s\n", leaderStr)
+	}
+	if len(status.Peers) == 0 {
+		fmt.Println("\nNo peers configured.")
+		return
+	}
+	fmt.Println()
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 4, ' ', 0)
+	fmt.Fprintf(w, "%sADDRESS\tSTATUS\tLAST SEEN%s\n", colorBold, colorReset)
+	for _, p := range status.Peers {
+		statusStr := colorRed + "dead" + colorReset
+		if p.Alive {
+			statusStr = colorGreen + "alive" + colorReset
+		}
+		lastSeen := "never"
+		if !p.LastSeen.IsZero() {
+			lastSeen = time.Since(p.LastSeen).Round(time.Second).String() + " ago"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", p.Address, statusStr, lastSeen)
+	}
+	w.Flush()
+	fmt.Println()
+}
+
 func handleShell(baseURL string) {
 	fmt.Printf("%sEntering TinyMQ Interactive Shell. Type 'exit' to quit.%s\n", colorBold+colorGreen, colorReset)
 	scanner := bufio.NewScanner(os.Stdin)
-
 	for {
 		fmt.Printf("%stinymq>%s ", colorCyan, colorReset)
 		if !scanner.Scan() {
 			break
 		}
-
 		input := strings.TrimSpace(scanner.Text())
 		if input == "exit" || input == "quit" {
 			break
@@ -974,7 +1177,6 @@ func handleShell(baseURL string) {
 		if input == "" {
 			continue
 		}
-
 		parts := strings.SplitN(input, " ", 3)
 		cmd := parts[0]
 		var shellArgs []string
@@ -985,10 +1187,11 @@ func handleShell(baseURL string) {
 				shellArgs = strings.Split(input[len(cmd)+1:], " ")
 			}
 		}
-
 		switch cmd {
 		case "list", "status":
 			handleList(baseURL)
+		case "create":
+			handleCreate(baseURL, shellArgs)
 		case "pub", "publish":
 			handlePublish(baseURL, shellArgs)
 		case "sub", "consume":
@@ -1001,6 +1204,10 @@ func handleShell(baseURL string) {
 			handleRm(baseURL, shellArgs, true)
 		case "webhook":
 			handleWebhook(baseURL, shellArgs)
+		case "cluster":
+			handleCluster(baseURL, shellArgs)
+		case "group":
+			handleGroup(baseURL, os.Args[2:])
 		case "restore":
 			handleRestore(shellArgs)
 		case "bench":
@@ -1011,7 +1218,6 @@ func handleShell(baseURL string) {
 			fmt.Println("Unknown command. Type 'help' to see available commands.")
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		fmt.Printf("%s[Error] %v%s\n", colorRed, err, colorReset)
 	}
@@ -1023,6 +1229,7 @@ func printHelp() {
 	fmt.Println("  tmq <command> [arguments] [flags]")
 	fmt.Println("\nAvailable commands:")
 	fmt.Println("  status, list          Shows the table of active queues, RAM and consumers.")
+	fmt.Println("  create <queue>        Explicitly creates a queue (flags: --policy=reject|drop-oldest, --retention).")
 	fmt.Println("  pub <queue> <data>    Publishes a message (flags: --ttl, --delay, --broadcast).")
 	fmt.Println("  sub <queue>           Consumes messages from the queue (flags: --timeout, --limit).")
 	fmt.Println("  peek <queue>          Inspects messages in RAM without consuming them.")
@@ -1033,6 +1240,9 @@ func printHelp() {
 	fmt.Println("  rm <queue>            Deletes a queue and its log file entirely.")
 	fmt.Println("  purge <queue>         Empties a queue without deleting it.")
 	fmt.Println("  webhook <add|list>    Manages webhooks for a topic.")
+	fmt.Println("  cluster status        Shows this node's role, term, leader, and peer health.")
+	fmt.Println("  cluster peers         Same view, focused on peers (flag: --watch, refresh every 2s).")
+	fmt.Println("  group <create|list>   Manages consumer groups for a topic (create <topic> <group> / list <topic>).")
 	fmt.Println("  top                   Live dashboard in your terminal (refreshes every 2s).")
 	fmt.Println("  shell                 Opens an interactive REPL session.")
 	fmt.Println("\nEnvironment variables:")

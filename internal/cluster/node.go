@@ -34,6 +34,12 @@ type Peer struct {
 	LastSeen time.Time
 }
 
+type PeerSnapshot struct {
+	Address  string    `json:"address"`
+	Alive    bool      `json:"alive"`
+	LastSeen time.Time `json:"last_seen"`
+}
+
 type Node struct {
 	Address           string
 	HttpPort          string
@@ -781,4 +787,31 @@ func (n *Node) Stop() {
 	}
 	n.wg.Wait()
 	log.Println("[Cluster] Node gracefully shut down.")
+}
+
+func (n *Node) RoleString() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	switch n.Role {
+	case Leader:
+		return "leader"
+	case Candidate:
+		return "candidate"
+	default:
+		return "follower"
+	}
+}
+
+func (n *Node) GetPeersSnapshot() []PeerSnapshot {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	peers := make([]PeerSnapshot, 0, len(n.Peers))
+	for _, p := range n.Peers {
+		peers = append(peers, PeerSnapshot{
+			Address:  p.Address,
+			Alive:    p.IsAlive,
+			LastSeen: p.LastSeen,
+		})
+	}
+	return peers
 }

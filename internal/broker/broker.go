@@ -837,6 +837,18 @@ func (b *Broker) CreateGroup(topicName, groupName string) (string, error) {
 	return virtualName, nil
 }
 
+func (b *Broker) GetGroups(topicName string) []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	bindings := b.bindings[topicName]
+	groups := make([]string, 0, len(bindings))
+	prefix := topicName + "::"
+	for vt := range bindings {
+		groups = append(groups, strings.TrimPrefix(vt, prefix))
+	}
+	return groups
+}
+
 func (b *Broker) GetStateSnapshot() []message.Message {
 	b.mu.RLock()
 	topics := make([]*Topic, 0, len(b.Topics))

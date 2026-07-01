@@ -107,6 +107,14 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 	mux.HandleFunc("/api/queues/purge", s.leaderProxy(s.withAuth(s.handleQueuePurge)))
 	mux.HandleFunc("/api/queues/delete", s.leaderProxy(s.withAuth(s.handleQueueDelete)))
 	mux.HandleFunc("/api/queues/webhooks", s.leaderProxy(s.withAuth(s.handleGetWebhooks)))
+	mux.HandleFunc("/api/cluster/status", s.withAuth(s.handleClusterStatus))
+	mux.HandleFunc("/api/groups", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.leaderProxy(s.handleGroups)(w, r)
+			return
+		}
+		s.handleGroups(w, r)
+	}))
 
 	// WebSocket
 	wsServer := ws.NewServer(b)
@@ -720,6 +728,43 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		topic := r.URL.Query().Get("topic")
+		if topic == "" {
+			http.Error(w, "topic query parameter is required", http.StatusBadRequest)
+			return
+		}
+		groups := s.broker.GetGroups(topic)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"topic": topic, "groups": groups})
+	case http.MethodPost:
+		var req struct {
+			Topic string `json:"topic"`
+			Group string `json:"group"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if req.Topic == "" || req.Group == "" {
+			http.Error(w, "topic and group are required", http.StatusBadRequest)
+			return
+		}
+		virtualTopic, err := s.broker.CreateGroup(req.Topic, req.Group)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"status": "created", "virtual_topic": virtualTopic})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleGetWebhooks(w http.ResponseWriter, r *http.Request) {
 	urls := s.broker.GetWebhooks(r.URL.Query().Get("queue"))
 	if urls == nil {
@@ -757,14 +802,30 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	if s.clusterNode != nil {
-		role := "follower"
-		if s.clusterNode.IsLeader() {
-			role = "leader"
-		}
-		res["cluster_role"] = role
+		res["cluster_role"] = s.clusterNode.RoleString()
 		res["cluster_term"] = s.clusterNode.GetCurrentTerm()
 	}
 
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(res)
+}
+
+func (s *Server) handleClusterStatus(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.clusterNode == nil {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{
+			"clustering_enabled": false,
+		})
+		return
+	}
+	res := map[string]any{
+		"clustering_enabled": true,
+		"role":               s.clusterNode.RoleString(),
+		"term":               s.clusterNode.GetCurrentTerm(),
+		"leader_http":        s.clusterNode.GetLeaderHTTP(),
+		"peers":              s.clusterNode.GetPeersSnapshot(),
+	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(res)
 }

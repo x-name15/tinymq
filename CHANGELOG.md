@@ -2,6 +2,29 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.0.2] - 2026-07-01 — CLI Expansion: Cluster Visibility
+
+### Added
+- **`tmq cluster status`** — new CLI command showing the connected node's cluster role (leader/follower/candidate), current Raft term, recognized leader address, and a peer health table (address, alive/dead, time since last seen). Available both as a top-level command and inside `tmq shell`.
+- **`GET /api/cluster/status`** — new REST endpoint backing the CLI command above. Read-only, does not proxy to the leader (intentionally answerable by any node, since diagnosing a cluster split requires querying each node's own view). Returns `{"clustering_enabled": false}` when the node isn't running with clustering configured.
+- **`Node.RoleString()` and `Node.GetPeersSnapshot()`** — new exported methods on `cluster.Node` consolidating role-to-string mapping (now correctly includes `"candidate"`, previously only `"leader"`/`"follower"` were distinguished in `/healthz`) and peer state snapshotting.
+- **`tmq group create/list <topic>`** — new CLI command exposing `Broker.CreateGroup` (previously only reachable implicitly via `?group=` on `/consume/`). `create` registers a named consumer group binding for a topic; `list` shows all groups currently bound to it.
+- **`GET /api/groups` and `POST /api/groups`** — new REST endpoints backing the CLI command. GET resolves locally on any node (read-only); POST is proxied to the cluster leader, since group creation triggers replication via `OnGroupCreate`.
+- **`Broker.GetGroups(topic string) []string`** — new exported method returning the group names bound to a topic, derived from the existing internal `bindings` map.
+- **`tmq cluster peers [--watch]`** — new CLI subcommand for observing cluster peer health, term, and leader in real time. `--watch` clears and refreshes the terminal every 2s (same pattern as `tmq top`), useful for watching a leader election happen live (e.g. during a `kubectl delete pod` failover test). Shares its underlying request/render logic with `tmq cluster status` via the new `printClusterStatus` helper.
+- **`tmq create <topic> [--policy=reject|drop-oldest] [--retention=duration]`** — new CLI command exposing `Broker.CreateTopic` explicitly, so queues can be provisioned with a specific eviction policy and/or message retention up front instead of relying on implicit creation (with default policy, no retention) on first publish.
+
+### Changed
+- **`/healthz` now reports `cluster_role` via `Node.RoleString()`** instead of a local `IsLeader()` check, so a node mid-election now correctly reports `"candidate"` instead of being lumped in with `"follower"`.
+
+### Documentation
+- Added `tmq create`, `tmq group create/list`, and `tmq cluster status`/`tmq cluster peers [--watch]` to the `tmq CLI` command reference table, grouped under new "Consumer groups" and "Cluster" sections.
+- Added a note clarifying that `tmq cluster status`/`tmq cluster peers` only return meaningful data against a broker running with clustering enabled, and report `Clustering is not enabled on this node (standalone mode).` otherwise.
+- Documented `POST /api/groups` and `GET /api/groups` in the HTTP API reference, including the explicit-registration alternative to the existing implicit `?group=` binding on `/consume/{topic}`, and the request/response payload for both create and list.
+- Documented `GET /api/cluster/status` in the HTTP API reference, including sample responses for both clustering-enabled and standalone modes, and a note that it deliberately does not proxy to the leader (unlike other cluster-aware endpoints) since it reports the querying node's own local view.
+- Clarified that `role` in `/api/cluster/status` and `cluster_role` in `/healthz` now share the same three-value classification (`leader`/`follower`/`candidate`), correcting a prior gap where `/healthz` only distinguished `leader`/`follower`.
+
+---
 ## [3.0.1] - 2026-07-01 — Core & Transport Reliability Fixes
 
 ### Fixed
