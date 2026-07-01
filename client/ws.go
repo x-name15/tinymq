@@ -15,7 +15,7 @@ import (
 	"github.com/x-name15/tinymq/internal/message"
 )
 
-const MaxFrameSize = 16 * 1024 * 1024 
+const MaxFrameSize = 16 * 1024 * 1024
 
 type wsCommand struct {
 	Action string `json:"action"`
@@ -71,12 +71,12 @@ func (c *WSClient) startKeepalive() {
 }
 
 func (c *WSClient) writePingFrame() error {
-	header := []byte{0x89, 0x80} 
+	header := []byte{0x89, 0x80}
 	maskKey := make([]byte, 4)
 	if _, err := rand.Read(maskKey); err != nil {
 		return err
 	}
-	
+
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 

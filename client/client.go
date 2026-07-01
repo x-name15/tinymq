@@ -23,14 +23,14 @@ type PublishOptions struct {
 	TTL         time.Duration
 	Delay       time.Duration
 	Broadcast   bool
-	Priority    string            
-	Idempotency string            
-	Headers     map[string]string 
+	Priority    string
+	Idempotency string
+	Headers     map[string]string
 }
 
 type SubscriptionOptions struct {
-	Timeout string 
-	Group   string 
+	Timeout string
+	Group   string
 }
 
 func NewClient(baseURL string, apiKey ...string) *Client {
@@ -162,13 +162,13 @@ func (c *Client) CreateTopic(ctx context.Context, topic, policy string, maxQueue
 	if err != nil {
 		return err
 	}
-	
+
 	req, err := c.req(ctx, http.MethodPost, "/api/topic/create", body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -188,7 +188,7 @@ func (c *Client) CreateGroup(ctx context.Context, topic, group string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -208,7 +208,7 @@ func (c *Client) Peek(ctx context.Context, topic string, limit int) ([]message.M
 	if err != nil {
 		return nil, err
 	}
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -219,7 +219,7 @@ func (c *Client) Peek(ctx context.Context, topic string, limit int) ([]message.M
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("peek failed (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
-	
+
 	var res map[string][]message.Message
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return nil, err
@@ -232,7 +232,7 @@ func (c *Client) ClusterStatus(ctx context.Context) (map[string]interface{}, err
 	if err != nil {
 		return nil, err
 	}
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -243,7 +243,7 @@ func (c *Client) ClusterStatus(ctx context.Context) (map[string]interface{}, err
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("cluster status failed (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
-	
+
 	var status map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		return nil, err
