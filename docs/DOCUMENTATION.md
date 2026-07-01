@@ -617,40 +617,65 @@ tmq backup              # Compresses the ./data folder (--format=zip|tar)
 
 ## Go SDK integration (advanced)
 
-The native SDK (`client/client.go`) abstracts HTTP calls, handles ACKs, and offers resilient worker patterns.
+The native Go SDK (`client/client.go`) abstracts HTTP calls, handles advanced routing (Priorities, Consumer Groups), and provides a highly resilient WebSocket client with automatic exponential backoff.
 
 ### Installation
 
 Install into your Go project:
 
 ```bash
-go get github.com/x-name15/tinymq/client
+go get [github.com/x-name15/tinymq/client](https://github.com/x-name15/tinymq/client)
 ```
 
-### Connecting & publishing
+### HTTP Client: Publishing & Administration
+
+The standard HTTP client uses modern Go idioms, requiring a `context.Context` for safe cancellation and timeouts. You can now use `PublishOptions` for advanced message routing.
 
 ```go
 package main
 
-import "github.com/x-name15/tinymq/client"
+import (
+    "context"
+    "log"
+    "time"
+
+    "[github.com/x-name15/tinymq/client](https://github.com/x-name15/tinymq/client)"
+)
 
 func main() {
-    mq := client.NewClient("http://127.0.0.1:7800")
+    // Initialize client with a default 60s safe timeout
+    mq := client.NewClient("[http://127.0.0.1:7800](http://127.0.0.1:7800)", "optional_api_key")
+    ctx := context.Background()
+
+    // 1. Cluster Administration (Optional)
+    mq.CreateTopic(ctx, "orders", "durable", 10000)
+    mq.CreateGroup(ctx, "orders", "billing-service")
+
+    // 2. Standard Publish
     payload := []byte(`{"event": "user_signup", "id": 99}`)
-    
-    // Standard Publish
-    if err := mq.Publish("users.new", payload); err != nil {
-        panic("broker unreachable")
+    if err := mq.Publish(ctx, "users.new", payload, nil); err != nil {
+        log.Fatalf("publish failed: %v", err)
+    }
+
+    // 3. Advanced Publish (Priority, Idempotency, Broadcast & Headers)
+    opts := &client.PublishOptions{
+        Priority:    "high",
+        Broadcast:   true, // Fan-out to all queues
+        Idempotency: "txn_987654321",
+        Headers: map[string]string{
+            "X-Source": "api-gateway",
+        },
     }
     
-    // Broadcast (Fan-out)
-    mq.PublishBroadcast("users.new", payload)
+    if err := mq.Publish(ctx, "users.premium", payload, opts); err != nil {
+        log.Fatalf("advanced publish failed: %v", err)
+    }
 }
 ```
 
-### High-resilience subscription (workers)
+### High-resilience HTTP Polling (Consumer Groups)
 
-`Subscribe` uses long-polling and exponential backoff (1s up to 32s). If a handler returns an error, the SDK automatically calls `/requeue` to increment the retry count. After 3 failures, the broker safely moves the payload to a `.dlq` topic.
+For standard HTTP consumers, `Subscribe` acts as a synchronous long-polling fetcher. It now natively supports **Consumer Groups** for safe, distributed load balancing among multiple workers.
 
 ```go
 package main
@@ -658,64 +683,81 @@ package main
 import (
     "context"
     "fmt"
-    "errors"
-    "github.com/x-name15/tinymq/client"
-    "github.com/x-name15/tinymq/internal/message"
+    "log"
+
+    "[github.com/x-name15/tinymq/client](https://github.com/x-name15/tinymq/client)"
 )
 
 func main() {
-    mq := client.NewClient("http://127.0.0.1:7800")
+    mq := client.NewClient("[http://127.0.0.1:7800](http://127.0.0.1:7800)")
+    ctx := context.Background()
 
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+    // Configure Long-Polling with Consumer Groups
+    opts := &client.SubscriptionOptions{
+        Timeout: "30s", 
+        Group:   "billing-service", // Ensures messages are load-balanced across workers
+    }
 
-    go mq.Subscribe(ctx, "orders", client.SubscriptionOptions{Timeout: "10s"}, func(msg message.Message) error {
-        fmt.Printf("Processing order: %s\n", string(msg.Payload))
-        if string(msg.Payload) == "bad_data" {
-            return errors.New("database connection lost") // Will trigger backoff & DLQ logic
+    log.Println("Worker started, polling for orders...")
+
+    // Standard consumer loop
+    for {
+        msgs, err := mq.Subscribe(ctx, "orders", opts)
+        if err != nil {
+            log.Printf("Network or broker error: %v (retrying...)", err)
+            continue
         }
-        return nil
-    })
 
-    select {}
+        for _, msg := range msgs {
+            fmt.Printf("Processing order ID: %s | Payload: %s\n", msg.ID, string(msg.Payload))
+            // Implement your business logic / DLQ handling here
+        }
+    }
 }
 ```
 
-### Real-Time WebSocket Client
+### Real-Time WebSocket Client (Auto-Reconnecting)
 
-For sub-millisecond latency without HTTP overhead, you can use the native WebSocket client. This is ideal for high-throughput, long-lived connections.
+For sub-millisecond latency without HTTP overhead, use the native WebSocket client. This is ideal for high-throughput, long-lived connections.
 
-`WSClient` handles the RFC 6455 handshake, frame masking, and base64 payload decoding natively.
+The v3.1.0 `WSClient` features a **Thread-Safe Single Read-Loop** and an **Automated Reconnection Pipeline**. If the server drops or the network partitions, the SDK automatically cycles sockets and re-subscribes to all active topics using an exponential backoff strategy (1s up to 32s).
 
 ```go
 package main
 
 import (
     "fmt"
+    "log"
+
     "[github.com/x-name15/tinymq/client](https://github.com/x-name15/tinymq/client)"
     "[github.com/x-name15/tinymq/internal/message](https://github.com/x-name15/tinymq/internal/message)"
 )
 
 func main() {
-    // URL uses http/https, the client automatically upgrades it to ws/wss
-    ws := client.NewWSClient("[http://127.0.0.1:7800](http://127.0.0.1:7800)", "optional_api_key")
-    
-    if err := ws.Connect(); err != nil {
-        panic(err)
+    // NewWSClient automatically dials and boots the auto-reconnect & keepalive loops
+    ws, err := client.NewWSClient("127.0.0.1:7800")
+    if err != nil {
+        log.Fatalf("Initial connection failed: %v", err)
     }
+    defer ws.Close() // Safely tears down resources and routines
 
-    // Subscribe asynchronously
-    go ws.Subscribe("iot.sensors.*", func(msg message.Message) {
-        fmt.Printf("Instant WS Push -> ID: %s | Payload: %s\n", msg.ID, string(msg.Payload))
+    // 1. Subscribe asynchronously (Thread-Safe)
+    err = ws.Subscribe("iot.sensors.*", func(msg message.Message) {
+        // Enforced backpressure: Handlers run synchronously per connection by default.
+        // For massive concurrency, dispatch to your own worker pool here.
+        fmt.Printf("Instant Push -> Topic: %s | Payload: %s\n", msg.Topic, string(msg.Payload))
     })
 
-    // Publish instantly without HTTP connection overhead
-    ws.Publish("iot.sensors.temperature", []byte(`{"celsius": 24.5}`))
+    if err != nil {
+        log.Fatalf("Subscription failed: %v", err)
+    }
 
-    select {} // Block forever
+    // 2. Dynamic Unsubscribe (Optional)
+    // ws.Unsubscribe("iot.sensors.*")
+
+    select {} // Block forever while WS handles traffic in the background
 }
 ```
----
 
 ## Configuration & deployment
 
