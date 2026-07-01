@@ -25,8 +25,9 @@ type Server struct {
 }
 
 type mqttConn struct {
-	conn net.Conn
-	mu   sync.Mutex
+	conn      net.Conn
+	mu        sync.Mutex
+	connected bool
 }
 
 func (mc *mqttConn) write(data []byte) error {
@@ -137,6 +138,9 @@ func (s *Server) handleClient(conn net.Conn) {
 }
 
 func (s *Server) processPacket(mc *mqttConn, pType, flags byte, payload []byte, spies map[string]chan message.Message) error {
+	if pType != PacketConnect && !mc.connected {
+		return errors.New("protocol violation: packet sent before CONNECT")
+	}
 	switch pType {
 	case PacketConnect:
 		return s.handleConnect(mc, payload)
@@ -225,8 +229,9 @@ func (s *Server) handleConnect(mc *mqttConn, payload []byte) error {
 		}
 	}
 
+	mc.connected = true
 	log.Printf("[MQTT] Client '%s' successfully connected!", clientID)
-	return mc.write([]byte{PacketConnAck << 4, 2, 0x00, 0x00}) // 0x00 = Accepted
+	return mc.write([]byte{PacketConnAck << 4, 2, 0x00, 0x00})
 }
 
 func (s *Server) handlePublish(mc *mqttConn, flags byte, payload []byte) error {

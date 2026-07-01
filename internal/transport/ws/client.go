@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/x-name15/tinymq/internal/message"
 )
@@ -50,17 +51,15 @@ func (c *Client) readPump() {
 		c.mu.Unlock()
 		c.hub.RemoveClient(c)
 	}()
-
 	for {
+		c.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		header := make([]byte, 2)
 		if _, err := io.ReadFull(c.rw, header); err != nil {
 			break
 		}
-
 		opCode := header[0] & 0x0F
 		isMasked := (header[1] & 0x80) != 0
 		payloadLen := uint64(header[1] & 0x7F)
-
 		if opCode == opCodeClose {
 			break
 		}
@@ -71,7 +70,6 @@ func (c *Client) readPump() {
 		if opCode == opCodePong {
 			continue
 		}
-
 		if payloadLen == 126 {
 			extLen := make([]byte, 2)
 			if _, err := io.ReadFull(c.rw, extLen); err != nil {
@@ -85,12 +83,10 @@ func (c *Client) readPump() {
 			}
 			payloadLen = binary.BigEndian.Uint64(extLen)
 		}
-
 		if payloadLen > 2<<20 {
 			log.Println("[WS] Error: Payload exceeds 2MB limit")
 			break
 		}
-
 		var maskKey []byte
 		if isMasked {
 			maskKey = make([]byte, 4)
@@ -98,20 +94,17 @@ func (c *Client) readPump() {
 				break
 			}
 		}
-
 		payload := make([]byte, payloadLen)
 		if payloadLen > 0 {
 			if _, err := io.ReadFull(c.rw, payload); err != nil {
 				break
 			}
 		}
-
 		if isMasked {
 			for i := uint64(0); i < payloadLen; i++ {
 				payload[i] ^= maskKey[i%4]
 			}
 		}
-
 		if opCode == opCodeText {
 			log.Printf("[WS] RX (%s) opcode=%d len=%d", c.conn.RemoteAddr().String(), opCode, payloadLen)
 			c.handleCommand(payload)

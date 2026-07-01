@@ -71,7 +71,6 @@ func New(store *storage.DiskStorage) *Broker {
 		Timeout:   5 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
-
 	secureTransport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
@@ -79,12 +78,10 @@ func New(store *storage.DiskStorage) *Broker {
 				host = addr
 			}
 			_ = port
-
 			ips, err := net.LookupIP(host)
 			if err != nil {
 				return nil, err
 			}
-
 			for _, ip := range ips {
 				if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
 					return nil, errors.New("DNS rebinding blocked: target resolved to an internal IP at dial time")
@@ -93,7 +90,6 @@ func New(store *storage.DiskStorage) *Broker {
 			return dialer.DialContext(ctx, network, addr)
 		},
 	}
-
 	return &Broker{
 		Topics:          make(map[string]*Topic),
 		wildcards:       make(map[string]*Topic),
@@ -158,12 +154,10 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 	if defaultPolicy != "drop-oldest" {
 		defaultPolicy = "reject"
 	}
-
 	for _, name := range topicNames {
 		if strings.Contains(name, "::") {
 			parts := strings.SplitN(name, "::", 2)
 			sourceTopic := parts[0]
-
 			b.mu.Lock()
 			if b.bindings[sourceTopic] == nil {
 				b.bindings[sourceTopic] = make(map[string]bool)
@@ -171,13 +165,11 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 			b.bindings[sourceTopic][name] = true
 			b.mu.Unlock()
 		}
-
 		msgs, err := b.storage.LoadMessages(name)
 		if err != nil {
 			log.Printf("Failed to recover topic %s: %v\n", name, err)
 			continue
 		}
-
 		b.mu.Lock()
 		t := &Topic{
 			Name:     name,
@@ -211,16 +203,13 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		log.Printf("[Broker] SEC-ALERT: Binding loop or max depth detected resolving topic '%s'", topicName)
 		return errors.New("binding loop detected")
 	}
-
 	if len(topicName) == 0 || len(topicName) > 255 {
 		return errors.New("invalid topic name length (must be between 1 and 255 characters)")
 	}
-
 	if !validTopicRegex.MatchString(topicName) {
 		log.Printf("Rejected publish to invalid topic name: %s\n", topicName)
 		return errors.New("invalid topic name")
 	}
-
 	if !strings.Contains(topicName, "::") {
 		b.mu.RLock()
 		var boundTopics []string
@@ -230,17 +219,14 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			}
 		}
 		b.mu.RUnlock()
-
 		for _, dest := range boundTopics {
 			b.publishCore(dest, payload, headers, priority, expiresAt, deliverAt, isBroadcast, isReplication, depth+1)
 		}
 	}
-
 	t := b.getOrCreateTopic(topicName)
 	if t == nil {
 		return errors.New("broker maximum topic limit reached")
 	}
-
 	var matchingWildcards []*Topic
 	b.mu.RLock()
 	for name, wildcardT := range b.wildcards {
@@ -250,12 +236,10 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		}
 	}
 	b.mu.RUnlock()
-
 	if expiresAt == nil && t.Retention > 0 {
 		exp := time.Now().Add(t.Retention)
 		expiresAt = &exp
 	}
-
 	msg := message.Message{
 		ID:        helper.NewUUID(),
 		Topic:     topicName,
@@ -265,23 +249,11 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		DeliverAt: deliverAt,
 		Headers:   headers,
 	}
-
-	if !isBroadcast && b.storage != nil {
-		if err := b.storage.AppendPut(topicName, msg); err != nil {
-			log.Printf("Error persisting PUT record: %v\n", err)
-		}
-	}
-
 	if !isReplication && b.OnPublish != nil {
 		if err := b.OnPublish(topicName, payload); err != nil {
-			if !isBroadcast && b.storage != nil {
-				b.storage.AppendAck(topicName, msg.ID)
-			}
 			return err
 		}
 	}
-
-	// Webhooks
 	b.mu.RLock()
 	configs := b.webhooks[topicName]
 	b.mu.RUnlock()
@@ -305,7 +277,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			}
 		}(configs, payload)
 	}
-
 	t.mu.Lock()
 	spyCount := len(t.spies)
 	for _, spy := range t.spies {
@@ -319,7 +290,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 	if spyCount > 0 {
 		log.Printf("[Broker] Delivered message %s to %d spies on topic '%s'\n", msg.ID, spyCount, t.Name)
 	}
-
 	for _, wildcardT := range matchingWildcards {
 		wildcardT.mu.Lock()
 		spyCountW := len(wildcardT.spies)
@@ -335,7 +305,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			log.Printf("[Broker] Delivered message %s to %d spies on wildcard topic '%s'\n", msg.ID, spyCountW, wildcardT.Name)
 		}
 	}
-
 	if isBroadcast {
 		var broadcastChannels []chan message.Message
 		for _, wildcardT := range matchingWildcards {
@@ -348,7 +317,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		broadcastChannels = append(broadcastChannels, t.waitingConsumers...)
 		t.waitingConsumers = nil
 		t.mu.Unlock()
-
 		go func(channels []chan message.Message, m message.Message) {
 			for _, ch := range channels {
 				select {
@@ -360,14 +328,16 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		}(broadcastChannels, msg)
 		return nil
 	}
-
 	t.mu.Lock()
-
 	if t.Deleted {
 		t.mu.Unlock()
 		return errors.New("topic was concurrently deleted")
 	}
-
+	if !isBroadcast && b.storage != nil {
+		if err := b.storage.AppendPut(topicName, msg); err != nil {
+			log.Printf("Error persisting PUT record: %v\n", err)
+		}
+	}
 	for _, wildcardT := range matchingWildcards {
 		wildcardT.mu.Lock()
 		if len(wildcardT.waitingConsumers) > 0 {
@@ -388,14 +358,12 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			wildcardT.mu.Unlock()
 		}
 	}
-
 	var pendingConsumer chan message.Message
 	if len(t.waitingConsumers) > 0 {
 		pendingConsumer = t.waitingConsumers[0]
 		t.waitingConsumers[0] = nil
 		t.waitingConsumers = t.waitingConsumers[1:]
 	}
-
 	if pendingConsumer != nil {
 		t.mu.Unlock()
 		select {
@@ -407,7 +375,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			t.mu.Lock()
 		}
 	}
-
 	var targetQueue *[]message.Message
 	switch priority {
 	case "high":
@@ -417,7 +384,6 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 	default:
 		targetQueue = &t.Messages
 	}
-
 	totalActiveMessages := len(t.HighMessages) + len(t.Messages) + len(t.LowMessages)
 	if totalActiveMessages >= getMaxMessages() {
 		if t.Policy == "drop-oldest" {
@@ -447,10 +413,10 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 	return nil
 }
 
-func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
+func (b *Broker) extractMessages(t *Topic, limit int) ([]message.Message, []string) {
 	var results []message.Message
+	var expiredIDs []string
 	now := time.Now()
-
 	extractFrom := func(queue *[]message.Message) {
 		var keep []message.Message
 		for _, msg := range *queue {
@@ -458,24 +424,18 @@ func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
 				keep = append(keep, msg)
 				continue
 			}
-
 			if msg.ExpiresAt != nil && now.After(*msg.ExpiresAt) {
-				if b.storage != nil {
-					b.storage.AppendAck(t.Name, msg.ID)
-				}
+				expiredIDs = append(expiredIDs, msg.ID)
 				continue
 			}
-
 			if msg.DeliverAt != nil && now.Before(*msg.DeliverAt) {
 				keep = append(keep, msg)
 				continue
 			}
-
 			results = append(results, msg)
 		}
 		*queue = keep
 	}
-
 	extractFrom(&t.HighMessages)
 	if len(results) < limit {
 		extractFrom(&t.Messages)
@@ -483,20 +443,26 @@ func (b *Broker) extractMessages(t *Topic, limit int) []message.Message {
 	if len(results) < limit {
 		extractFrom(&t.LowMessages)
 	}
+	return results, expiredIDs
+}
 
-	return results
+func (b *Broker) ackExpired(topicName string, expiredIDs []string) {
+	if b.storage == nil {
+		return
+	}
+	for _, id := range expiredIDs {
+		b.storage.AppendAck(topicName, id)
+	}
 }
 
 func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Message) ([]message.Message, bool) {
 	if len(topicName) > 0 && !b.IsValidTopicName(topicName) {
 		return nil, false
 	}
-
 	targetTopic := b.getOrCreateTopic(topicName)
 	if targetTopic == nil {
 		return nil, false
 	}
-
 	var matchingTopics []*Topic
 	if strings.Contains(topicName, "*") {
 		b.mu.RLock()
@@ -510,24 +476,25 @@ func (b *Broker) Consume(topicName string, limit int, notifyChan chan message.Me
 		}
 		b.mu.RUnlock()
 	}
-
 	for _, t := range matchingTopics {
 		t.mu.Lock()
-		results := b.extractMessages(t, limit)
+		results, expiredIDs := b.extractMessages(t, limit)
 		t.mu.Unlock()
+		b.ackExpired(t.Name, expiredIDs)
 		if len(results) > 0 {
 			return results, true
 		}
 	}
-
 	targetTopic.mu.Lock()
-	defer targetTopic.mu.Unlock()
-	results := b.extractMessages(targetTopic, limit)
+	results, expiredIDs := b.extractMessages(targetTopic, limit)
+	if len(results) == 0 {
+		targetTopic.waitingConsumers = append(targetTopic.waitingConsumers, notifyChan)
+	}
+	targetTopic.mu.Unlock()
+	b.ackExpired(targetTopic.Name, expiredIDs)
 	if len(results) > 0 {
 		return results, true
 	}
-
-	targetTopic.waitingConsumers = append(targetTopic.waitingConsumers, notifyChan)
 	return nil, false
 }
 
@@ -546,12 +513,10 @@ func (b *Broker) GetStats() ([]TopicStat, int) {
 		webhooksCopy[k] = urls
 	}
 	b.mu.RUnlock()
-
 	totalWebhooks := 0
 	for _, urls := range webhooksCopy {
 		totalWebhooks += len(urls)
 	}
-
 	stats := make([]TopicStat, 0, len(topicsCopy))
 	for name, t := range topicsCopy {
 		_, hasWebhook := webhooksCopy[name]
@@ -597,7 +562,6 @@ func (b *Broker) Ack(topicName string, msgID string) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	ackFrom := func(queue *[]message.Message) bool {
 		for i, m := range *queue {
 			if m.ID == msgID {
@@ -611,7 +575,6 @@ func (b *Broker) Ack(topicName string, msgID string) bool {
 		}
 		return false
 	}
-
 	return ackFrom(&t.HighMessages) || ackFrom(&t.Messages) || ackFrom(&t.LowMessages)
 }
 
@@ -619,26 +582,21 @@ func (b *Broker) Requeue(msg message.Message) {
 	if msg.RetryCount < 0 {
 		msg.RetryCount = 0
 	}
-
 	msg.RetryCount++
 	targetTopic := msg.Topic
-
 	if msg.RetryCount >= 3 {
 		targetTopic = msg.Topic + ".dlq"
 		msg.Topic = targetTopic
 		log.Printf("Message %s moved to DLQ: %s\n", msg.ID, targetTopic)
 	}
-
 	t := b.getOrCreateTopic(targetTopic)
 	if t == nil {
 		log.Printf("[Broker] Requeue failed: max topics limit reached for %s\n", targetTopic)
 		return
 	}
-
 	if b.storage != nil {
 		b.storage.AppendPut(targetTopic, msg)
 	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.waitingConsumers) > 0 {
@@ -648,9 +606,16 @@ func (b *Broker) Requeue(msg message.Message) {
 		consumerChan <- msg
 		return
 	}
-	if len(t.Messages) >= getMaxMessages() {
-		log.Printf("[Broker] Requeue rejected for topic '%s': capacity reached\n", targetTopic)
-		return
+	if len(t.waitingConsumers) > 0 {
+		consumerChan := t.waitingConsumers[0]
+		t.waitingConsumers[0] = nil
+		t.waitingConsumers = t.waitingConsumers[1:]
+		select {
+		case consumerChan <- msg:
+			return
+		default:
+			log.Printf("[Broker] Waiting consumer on topic '%s' disappeared during requeue, enqueuing message\n", targetTopic)
+		}
 	}
 	t.Messages = append(t.Messages, msg)
 }
@@ -707,9 +672,7 @@ func (b *Broker) Peek(topicName string, limit int) []message.Message {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	var results []message.Message
-
 	appendUpToLimit := func(source []message.Message) {
 		for _, msg := range source {
 			if len(results) >= limit {
@@ -718,11 +681,9 @@ func (b *Broker) Peek(topicName string, limit int) []message.Message {
 			results = append(results, msg)
 		}
 	}
-
 	appendUpToLimit(t.HighMessages)
 	appendUpToLimit(t.Messages)
 	appendUpToLimit(t.LowMessages)
-
 	return results
 }
 
@@ -813,6 +774,7 @@ func (b *Broker) IsIdempotent(key string) bool {
 	}
 	const maxIdempotencyKeys = 20000
 	if len(b.idempotencyKeys) >= maxIdempotencyKeys {
+		log.Printf("[Broker] WARNING: idempotency key cap (%d) reached, new keys are not being tracked — duplicate detection is degraded until keys expire\n", maxIdempotencyKeys)
 		return false
 	}
 	b.idempotencyKeys[key] = now.Add(5 * time.Minute)
@@ -823,15 +785,12 @@ func (b *Broker) AddSpy(topicName string) (chan message.Message, error) {
 	if !b.IsValidTopicName(topicName) {
 		return nil, errors.New("invalid topic name")
 	}
-
 	t := b.getOrCreateTopic(topicName)
 	if t == nil {
 		return nil, errors.New("broker maximum topic limit reached")
 	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	ch := make(chan message.Message, 1024)
 	t.spies = append(t.spies, ch)
 	log.Printf("[Broker] Added spy on topic '%s' (total spies: %d)\n", topicName, len(t.spies))
@@ -862,19 +821,16 @@ func (b *Broker) CreateGroup(topicName, groupName string) (string, error) {
 		return "", errors.New("invalid group name format")
 	}
 	virtualName := fmt.Sprintf("%s::%s", topicName, groupName)
-
 	b.mu.Lock()
 	if b.bindings[topicName] == nil {
 		b.bindings[topicName] = make(map[string]bool)
 	}
 	b.bindings[topicName][virtualName] = true
 	b.mu.Unlock()
-
 	t := b.getOrCreateTopic(virtualName)
 	if t == nil {
 		return "", errors.New("broker maximum topic limit reached")
 	}
-
 	if b.OnGroupCreate != nil {
 		b.OnGroupCreate(topicName, groupName)
 	}
@@ -888,7 +844,6 @@ func (b *Broker) GetStateSnapshot() []message.Message {
 		topics = append(topics, t)
 	}
 	b.mu.RUnlock()
-
 	var allMessages []message.Message
 	for _, t := range topics {
 		t.mu.Lock()

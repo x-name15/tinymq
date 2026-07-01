@@ -705,7 +705,8 @@ docker run -d \
 - `TINYMQ_CLUSTER_SECRET`: Shared secret used to sign and verify all intra-cluster TCP messages via HMAC-SHA256. If unset, communication is unauthenticated and peers are accepted without verification.
 - `TINYMQ_CLUSTER_HTTP_ADVERTISE`: The HTTP address this node advertises to followers for reverse proxying (e.g., `192.168.1.10:7800`). Required when the node's bind address is not reachable by peers directly (Docker bridge networks, NAT, etc.).
 - `TINYMQ_CLUSTER_REPLICATE_TIMEOUT`: Timeout for each peer acknowledgment during quorum replication (default `500ms`). Accepts Go duration strings (e.g., `1s`, `200ms`).
-- `TINYMQ_CLUSTER_SELF`: The address this node advertises to peers as its own cluster identity (e.g., `192.168.1.10:7901`). Required when the TCP bind address (`TINYMQ_CLUSTER_ADDR`) is not reachable by other nodes — most commonly `0.0.0.0:7901` in Docker or Kubernetes. In Kubernetes, set this to `$(POD_NAME).tinymq-headless:7901` using the Downward API. When unset, the bind address is used as-is, which is correct for local deployments where all nodes share the same network.
+- `TINYMQ_CLUSTER_SELF`: The address this node advertises to peers as its own cluster identity (e.g., `192.168.1.10:7901`). Required when the TCP bind address (`TINYMQ_CLUSTER_ADDR`) is not reachable by other nodes—most commonly `0.0.0.0:7901` in Docker or Kubernetes. In Kubernetes, set this to `$(POD_NAME).tinymq-headless:7901` using the Downward API. When unset, the bind address is used as-is, which is correct for local deployments where all nodes share the same network.
+- `TINYMQ_CLUSTER_ALLOW_INSECURE`: Only for local testing. Set to `true` to bypass the fail-closed check and allow the cluster node to start without HMAC authentication even if `TINYMQ_CLUSTER_SECRET` is empty. **Never enable this in production.** Default: `false`.
 
 ### NATS gateway settings
 

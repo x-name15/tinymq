@@ -103,10 +103,10 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 
 	mux.HandleFunc("/api/queues/publish", s.leaderProxy(s.withAuth(s.handleQueuePublish)))
 	mux.HandleFunc("/api/queues/consume", s.leaderProxy(s.withAuth(s.handleQueueConsume)))
-	mux.HandleFunc("/api/queues/peek", s.withAuth(s.handleQueuePeek))
+	mux.HandleFunc("/api/queues/peek", s.leaderProxy(s.withAuth(s.handleQueuePeek)))
 	mux.HandleFunc("/api/queues/purge", s.leaderProxy(s.withAuth(s.handleQueuePurge)))
 	mux.HandleFunc("/api/queues/delete", s.leaderProxy(s.withAuth(s.handleQueueDelete)))
-	mux.HandleFunc("/api/queues/webhooks", s.withAuth(s.handleGetWebhooks))
+	mux.HandleFunc("/api/queues/webhooks", s.leaderProxy(s.withAuth(s.handleGetWebhooks)))
 
 	// WebSocket
 	wsServer := ws.NewServer(b)

@@ -2,6 +2,27 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.0.1] - 2026-07-01 — Core & Transport Reliability Fixes
+
+### Fixed
+- **Cluster HMAC now fails closed when unset.** Nodes previously started with cluster TCP authentication silently disabled if `TINYMQ_CLUSTER_SECRET` was empty, only logging a warning. A node now refuses to start under this condition unless `TINYMQ_CLUSTER_ALLOW_INSECURE=true` is explicitly set, since the open port allowed injecting `REPLICATE`/`BIND_GROUP`/`HEARTBEAT` messages from any reachable host.
+- **Storage no longer serializes all topics behind one lock.** `DiskStorage` used a single global mutex for every topic's disk I/O, meaning compacting one topic's WAL blocked publish/ack for every other topic. Switched to per-topic locking so topics are now fully independent on disk.
+- **WAL write order now matches in-memory enqueue order per topic.** `AppendPut` was writing to the WAL outside the topic lock, so concurrent publishes to the same topic could persist in a different order than they were queued/delivered, causing message reordering on crash recovery. The persist now happens inside the same topic-lock critical section as the delivery/enqueue decision.
+- **WAL compaction now fsyncs the parent directory after rename.** Closes a durability gap where a crash immediately after compaction's atomic rename could lose the rename on some filesystems.
+- **Consume/expiry no longer does disk I/O while holding the topic lock.** Expired-message ACKs during `Consume` were written to disk inside `Topic.mu`, stalling that topic's publishers/consumers under TTL-heavy load. ACKs for expired messages are now flushed after the lock is released.
+- **Leader heartbeat step-down now requires a strictly greater term (or an already-recognized leader at the same term).** Previously accepted `term >= currentTerm` unconditionally, which could let two same-term leaders flip-flop recognizing each other under anomalous conditions.
+- **`/api/queues/peek` and `/api/queues/webhooks` now proxy to the cluster leader like every other read/write route.** Followers were answering these two endpoints from local (possibly stale/empty) state instead of forwarding to the leader.
+- **Idempotency key cap exhaustion is now logged.** `IsIdempotent` silently stopped tracking new keys once the 20k cap was hit, degrading duplicate detection with no visibility.
+- **`Broker.Requeue` could silently drop a message if the waiting consumer disappeared mid-race.** Unlike every other delivery path in the broker (which uses a non-blocking `select`/`default` send and falls back to re-enqueuing), `Requeue` sent directly to the consumer's notification channel. If the consumer had already timed out and unsubscribed just as a message was being requeued, the message was written into a channel nobody would ever read again, and was lost instead of falling back to the topic queue.
+- **Cluster `REPLICATE` and `BIND_GROUP` messages were accepted from any authenticated peer at `term >= CurrentTerm`, without verifying the sender was the recognized leader.** Same weak-consensus pattern already fixed for `HEARTBEAT` (which requires a strictly greater term, or the already-recognized leader at the same term), but not previously propagated to these two message types. Any cluster-authenticated node could inject replicated messages or consumer-group bindings by simply matching the current term. Both messages now carry the leader's address and are validated against `VotedFor` before being accepted.
+- **MQTT transport did not require `CONNECT` before accepting `PUBLISH`/`SUBSCRIBE`.** A client could open a raw TCP connection and send `PUBLISH`/`SUBSCRIBE` packets directly, bypassing `TINYMQ_API_KEY` authentication entirely for that transport. Connections are now gated: any packet other than `CONNECT` sent before a successful `CONNECT` is rejected.
+- **WebSocket transport had no read timeout.** A client that opened a WS connection and went silent (no data, no ping) held its goroutine and file descriptor open indefinitely. `readPump` now enforces a 90-second idle deadline, refreshed on every received frame.
+- **WebSocket transport had no `unsubscribe` action.** Clients could only stop receiving a topic's messages by closing the entire connection, leaking a spy subscription (goroutine + channel on the broker) for the lifetime of long-lived connections that subscribed/unsubscribed repeatedly. Added `"unsubscribe"` as a supported WS command action.
+
+### Enviroment
+- `.env.example` documents `TINYMQ_CLUSTER_ALLOW_INSECURE` next to `TINYMQ_CLUSTER_SECRET`.
+
+---
 ## [3.0.0] - 2026-06-30 — Dashboard Redesign, UX Improvements & i18n Support
 
 ### Added
