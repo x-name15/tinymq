@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -19,188 +20,233 @@ type Client struct {
 }
 
 type PublishOptions struct {
-	TTL       time.Duration
-	Delay     time.Duration
-	Broadcast bool
+	TTL         time.Duration
+	Delay       time.Duration
+	Broadcast   bool
+	Priority    string            
+	Idempotency string            
+	Headers     map[string]string 
 }
 
 type SubscriptionOptions struct {
-	Timeout string
+	Timeout string 
+	Group   string 
 }
-
-type MessageHandler func(msg message.Message) error
 
 func NewClient(baseURL string, apiKey ...string) *Client {
-	c := &Client{
+	key := ""
+	if len(apiKey) > 0 {
+		key = apiKey[0]
+	}
+	return &Client{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 35 * time.Second,
+			Timeout: 60 * time.Second,
 		},
+		apiKey: key,
 	}
-	if len(apiKey) > 0 {
-		c.apiKey = apiKey[0]
-	}
-	return c
 }
 
-func (c *Client) authorize(req *http.Request) {
+func (c *Client) req(ctx context.Context, method, endpoint string, body []byte) (*http.Request, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	r, err := http.NewRequestWithContext(ctx, method, c.baseURL+endpoint, reader)
+	if err != nil {
+		return nil, err
+	}
 	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		r.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	return r, nil
 }
 
-func (c *Client) Publish(topic string, payload []byte, opts ...PublishOptions) error {
-	params := url.Values{}
-
-	if len(opts) > 0 {
-		opt := opts[0]
-		if opt.TTL > 0 {
-			params.Add("ttl", opt.TTL.String())
-		}
-		if opt.Delay > 0 {
-			params.Add("delay", opt.Delay.String())
-		}
-		if opt.Broadcast {
-			params.Add("broadcast", "true")
-		}
+func (c *Client) Publish(ctx context.Context, topic string, payload []byte, opts *PublishOptions) error {
+	u, err := url.Parse(c.baseURL + "/publish/" + topic)
+	if err != nil {
+		return err
 	}
 
-	safeTopic := url.PathEscape(topic)
-	var u string
-	if len(params) > 0 {
-		u = fmt.Sprintf("%s/publish/%s?%s", c.baseURL, safeTopic, params.Encode())
-	} else {
-		u = fmt.Sprintf("%s/publish/%s", c.baseURL, safeTopic)
-	}
+	q := u.Query()
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
 
-	req, _ := http.NewRequest(http.MethodPost, u, bytes.NewBuffer(payload))
-	req.Header.Set("Content-Type", "application/json")
-	c.authorize(req)
+	if opts != nil {
+		if opts.TTL > 0 {
+			q.Set("ttl", opts.TTL.String())
+		}
+		if opts.Delay > 0 {
+			q.Set("delay", opts.Delay.String())
+		}
+		if opts.Broadcast {
+			q.Set("broadcast", "true")
+		}
+		if opts.Priority != "" {
+			q.Set("priority", opts.Priority)
+		}
+		if opts.Idempotency != "" {
+			headers.Set("Idempotency-Key", opts.Idempotency)
+		}
+		for k, v := range opts.Headers {
+			headers.Set(k, v)
+		}
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := c.req(ctx, http.MethodPost, u.String()[len(c.baseURL):], payload)
+	if err != nil {
+		return err
+	}
+	for k, v := range headers {
+		req.Header[k] = v
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("broker rejected message with status: %d", resp.StatusCode)
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("publish failed (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 	return nil
 }
 
-func (c *Client) PublishBroadcast(topic string, payload []byte) error {
-	return c.Publish(topic, payload, PublishOptions{Broadcast: true})
+func (c *Client) Subscribe(ctx context.Context, topic string, opts *SubscriptionOptions) ([]message.Message, error) {
+	endpoint := fmt.Sprintf("/consume/%s?auto_ack=true", topic)
+	if opts != nil {
+		if opts.Timeout != "" {
+			endpoint += "&timeout=" + opts.Timeout
+		}
+		if opts.Group != "" {
+			endpoint += "&group=" + opts.Group
+		}
+	}
+
+	req, err := c.req(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("subscribe failed (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var msgs []message.Message
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		if err == io.EOF {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return msgs, nil
 }
 
-func (c *Client) Subscribe(ctx context.Context, topic string, options SubscriptionOptions, handler MessageHandler) {
-	params := url.Values{}
-	params.Add("auto_ack", "false")
-	params.Add("limit", "1")
-
-	if options.Timeout != "" {
-		params.Add("timeout", options.Timeout)
-	} else {
-		params.Add("timeout", "5s")
+func (c *Client) CreateTopic(ctx context.Context, topic, policy string, maxQueueSize int) error {
+	payload := map[string]interface{}{
+		"topic":          topic,
+		"policy":         policy,
+		"max_queue_size": maxQueueSize,
 	}
-
-	safeTopic := url.PathEscape(topic)
-	u := fmt.Sprintf("%s/consume/%s?%s", c.baseURL, safeTopic, params.Encode())
-
-	baseBackoff := 1 * time.Second
-	maxBackoff := 32 * time.Second
-	currentBackoff := baseBackoff
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		c.authorize(req)
-		resp, err := c.httpClient.Do(req)
-
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		if resp.StatusCode == http.StatusNotFound {
-			resp.Body.Close()
-			currentBackoff = baseBackoff
-			continue
-		}
-
-		if resp.StatusCode == http.StatusOK {
-			var msg message.Message
-			var msgList []message.Message
-
-			var buf bytes.Buffer
-			_, err := buf.ReadFrom(resp.Body)
-			bodyBytes := buf.Bytes()
-
-			resp.Body.Close()
-			if err != nil {
-				continue
-			}
-
-			if json.Unmarshal(bodyBytes, &msgList) == nil && len(msgList) > 0 {
-				msg = msgList[0]
-			} else if json.Unmarshal(bodyBytes, &msg) != nil {
-				continue
-			}
-
-			err = handler(msg)
-
-			safeMsgID := url.PathEscape(msg.ID)
-
-			if err == nil {
-				ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, safeTopic, safeMsgID)
-				ackReq, _ := http.NewRequest(http.MethodPost, ackURL, nil)
-				ackReq.Header.Set("Content-Type", "application/json")
-				c.authorize(ackReq)
-
-				if ackResp, ackErr := c.httpClient.Do(ackReq); ackErr == nil {
-					ackResp.Body.Close()
-				}
-				currentBackoff = baseBackoff
-			} else {
-				fmt.Printf("[SDK Resilience] Handler Failed: %v.\n", err)
-				fmt.Printf("[SDK Resilience] Re-queuing message %s to preserve...\n", msg.ID)
-
-				msgData, _ := json.Marshal(msg)
-				requeueURL := fmt.Sprintf("%s/requeue", c.baseURL)
-				reqReq, _ := http.NewRequest(http.MethodPost, requeueURL, bytes.NewBuffer(msgData))
-				reqReq.Header.Set("Content-Type", "application/json")
-				c.authorize(reqReq)
-				requeueOK := false
-				if reqResp, reqErr := c.httpClient.Do(reqReq); reqErr == nil {
-					requeueOK = reqResp.StatusCode == http.StatusAccepted
-					reqResp.Body.Close()
-				}
-				if requeueOK {
-					ackURL := fmt.Sprintf("%s/ack/%s/%s", c.baseURL, safeTopic, safeMsgID)
-					ackReq, _ := http.NewRequest(http.MethodPost, ackURL, nil)
-					ackReq.Header.Set("Content-Type", "application/json")
-					c.authorize(ackReq)
-					if ackResp, ackErr := c.httpClient.Do(ackReq); ackErr == nil {
-						ackResp.Body.Close()
-					}
-				} else {
-					fmt.Printf("[SDK Resilience] Requeue failed for message %s, leaving original unacknowledged.\n", msg.ID)
-				}
-				fmt.Printf("[SDK Resilience] Sleeping worker for %v before next attempt...\n", currentBackoff)
-				time.Sleep(currentBackoff)
-
-				currentBackoff *= 2
-				if currentBackoff > maxBackoff {
-					currentBackoff = maxBackoff
-				}
-			}
-			continue
-		}
-		resp.Body.Close()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
 	}
+	
+	req, err := c.req(ctx, http.MethodPost, "/api/topic/create", body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to create topic (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
+}
+
+func (c *Client) CreateGroup(ctx context.Context, topic, group string) error {
+	endpoint := fmt.Sprintf("/api/group/create?topic=%s&group=%s", url.QueryEscape(topic), url.QueryEscape(group))
+	req, err := c.req(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to create group (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
+}
+
+func (c *Client) Peek(ctx context.Context, topic string, limit int) ([]message.Message, error) {
+	endpoint := fmt.Sprintf("/api/peek/%s?limit=%d", url.QueryEscape(topic), limit)
+	req, err := c.req(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("peek failed (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+	
+	var res map[string][]message.Message
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, err
+	}
+	return res["messages"], nil
+}
+
+func (c *Client) ClusterStatus(ctx context.Context) (map[string]interface{}, error) {
+	req, err := c.req(ctx, http.MethodGet, "/api/cluster/status", nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("cluster status failed (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+	
+	var status map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, err
+	}
+	return status, nil
 }

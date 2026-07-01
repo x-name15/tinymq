@@ -2,6 +2,34 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.1.0] - 2026-07-01 — SDK Architecture Overhaul & Production Hardening
+
+### Added
+- **Automated WebSocket Reconnection Pipeline (`client/ws.go`)**: Integrated a highly resilient auto-reconnect layer utilizing an Exponential Backoff strategy (starting at 1s, doubling up to a 32s threshold). If connection limits drop or network partitions occur, the client safely cycles network sockets and automatically transmits re-subscription frames to recover state without manual system intervention.
+- **`context.Context` Propagation Across REST Methods (`client/client.go`)**: Standardized explicit context control across `Publish`, `CreateTopic`, `CreateGroup`, `Peek`, and `ClusterStatus` endpoints. Prevents un-cancellable resource starvation loops and ensures immediate routine teardown if root parent microservices drop.
+- **`WSClient.Unsubscribe()` Implementation**: Introduced programmatic support to gracefully sever active stream listeners and propagate appropriate `"unsubscribe"` events over the socket connection to notify the broker.
+- **HTTP SDK Parity (`client/client.go`)**: Brought the core Go SDK up to date with server version 3.0.2 REST capabilities. 
+  - `PublishOptions` now supports `Priority` routing, `Idempotency` keys, and custom `Headers` (`X-MQ-*`).
+  - `SubscriptionOptions` now explicitly supports Consumer Groups routing (`Group` field) in HTTP polling.
+- **Admin Wrapper Methods (`client/client.go`)**: Introduced high-level administration bindings missing from previous versions:
+  - `Client.CreateTopic(topic, policy, maxQueueSize)`: Allows programmatic topic provisioning.
+  - `Client.CreateGroup(topic, group)`: Supports programmatic creation of Consumer Groups.
+  - `Client.Peek(topic, limit)`: Enables safe examination of queue heads without consuming data.
+  - `Client.ClusterStatus()`: Exposes node roles, health, and cluster topography to client applications.
+
+### Fixed
+- **Critical WebSocket Race Condition (`client/ws.go`)**: Resolved an issue where the background keepalive ping loop could perform concurrent write operations alongside user commands (`Subscribe`/`Unsubscribe`), causing data interleaving and protocol desynchronization on the TCP stream. Added strict serialization using `sync.Mutex` on all network writes.
+- **WebSocket Unbounded Resource Exhaustion (`client/ws.go`)**: Fixed an implicit DoS vulnerability where each incoming message dynamically spawned an unmonitored goroutine. Processing is now handled synchronously within the execution line, delegate-loading any performance scaling to the consumer's implementation and enforcing connection backpressure.
+- **Arbitrary Memory Allocation/OOM Panic (`client/ws.go`)**: Added a strict payload constraint (`MaxFrameSize = 16MB`) inside the WebSocket reader. This prevents remote panics and Out-Of-Memory (OOM) crashes triggered by parsing corrupted or intentionally malicious frame headers containing oversized length declarations.
+- **Infinite Loop and CPU Spikes**: Solved a performance regression where unmarshal syntax failures on malformed frames induced an unbounded high-frequency loop utilizing `continue` instructions without yielding or severing the broken pipe.
+- **Silent Subscription Inactivity Disconnects**: Implemented standard automated `PING` frames transmitted every 30 seconds by the client, neutralizing idle socket terminations enforced by the server's 90-second timeout policy (introduced in v3.0.2).
+
+### Changed
+- **Multiplexed Architecture Redesign (`client/ws.go`)**: Migrated the SDK's internal execution to a streamlined "Single Read-Loop" pattern. Executing `WSClient.Subscribe()` no longer locks the caller's main routing loop, safely unblocking multiple concurrent topic subscriptions over a single underlying connection.
+- **Client-Side Message Dispatching (`client/ws.go`)**: Rectified data-routing logic to properly inspect incoming message topics against a local synchronized handler map, ensuring consumers no longer experience overlapping data ingestion from cross-subscribed paths.
+- **HTTP Client Hardening (`client/client.go`)**: The default `http.Client` instantiated by `NewClient` now establishes a strict 60-second default timeout to prevent indefinite thread freezing during network outages or long-polling freezes.
+
+---
 ## [3.0.2] - 2026-07-01 — CLI Expansion: Cluster Visibility
 
 ### Added

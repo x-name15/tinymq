@@ -4,122 +4,114 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
-	"net/url"
-	"strings"
 	"sync"
+	"time"
 
 	"github.com/x-name15/tinymq/internal/message"
 )
 
-type WSClient struct {
-	baseURL string
-	apiKey  string
-	conn    net.Conn
-	rw      *bufio.ReadWriter
-	mu      sync.Mutex
-}
+const MaxFrameSize = 16 * 1024 * 1024 
 
 type wsCommand struct {
-	Action  string `json:"action"`
-	Topic   string `json:"topic,omitempty"`
-	Payload string `json:"payload,omitempty"`
+	Action string `json:"action"`
+	Topic  string `json:"topic,omitempty"`
 }
 
-func NewWSClient(baseURL string, apiKey ...string) *WSClient {
-	wsURL := strings.Replace(baseURL, "http://", "ws://", 1)
-	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
-
-	c := &WSClient{baseURL: wsURL}
-	if len(apiKey) > 0 {
-		c.apiKey = apiKey[0]
-	}
-	return c
+type WSClient struct {
+	addr       string
+	conn       net.Conn
+	rw         *bufio.ReadWriter
+	writeMu    sync.Mutex
+	handlersMu sync.RWMutex
+	handlers   map[string]func(message.Message)
+	stop       chan struct{}
+	wg         sync.WaitGroup
+	once       sync.Once
 }
 
-func (c *WSClient) Connect() error {
-	u, err := url.Parse(c.baseURL)
+func NewWSClient(addr string) (*WSClient, error) {
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	host := u.Host
-	if !strings.Contains(host, ":") {
-		if u.Scheme == "wss" {
-			host += ":443"
-		} else {
-			host += ":80"
+	c := &WSClient{
+		addr:     addr,
+		conn:     conn,
+		rw:       bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)),
+		handlers: make(map[string]func(message.Message)),
+		stop:     make(chan struct{}),
+	}
+
+	c.wg.Add(2)
+	go c.readLoop()
+	go c.startKeepalive()
+	return c, nil
+}
+
+func (c *WSClient) startKeepalive() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := c.writePingFrame(); err != nil {
+				return
+			}
+		case <-c.stop:
+			return
 		}
 	}
+}
 
-	conn, err := net.Dial("tcp", host)
-	if err != nil {
+func (c *WSClient) writePingFrame() error {
+	header := []byte{0x89, 0x80} 
+	maskKey := make([]byte, 4)
+	if _, err := rand.Read(maskKey); err != nil {
 		return err
 	}
+	
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
-	keyBytes := make([]byte, 16)
-	rand.Read(keyBytes)
-	wsKey := base64.StdEncoding.EncodeToString(keyBytes)
-
-	path := "/ws"
-	if c.apiKey != "" {
-		path += "?token=" + url.QueryEscape(c.apiKey)
-	}
-
-	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", path, u.Host, wsKey)
-
-	if _, err := conn.Write([]byte(req)); err != nil {
+	if _, err := c.rw.Write(header); err != nil {
 		return err
 	}
-
-	c.conn = conn
-	c.rw = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-
-	resp, err := http.ReadResponse(c.rw.Reader, nil)
-	if err != nil {
+	if _, err := c.rw.Write(maskKey); err != nil {
 		return err
 	}
-	if resp.StatusCode != 101 {
-		return fmt.Errorf("websocket handshake failed with status %d", resp.StatusCode)
-	}
-
-	return nil
+	return c.rw.Flush()
 }
 
 func (c *WSClient) writeFrame(payload string) error {
 	data := []byte(payload)
 	length := len(data)
+	var header []byte
 
-	header := []byte{0x81}
-	var lenByte byte
+	header = append(header, 0x81)
 
 	if length <= 125 {
-		lenByte = byte(length) | 0x80
+		header = append(header, byte(length)|0x80)
 	} else if length <= 65535 {
-		lenByte = 126 | 0x80
+		header = append(header, 126|0x80)
+		header = append(header, byte(length>>8), byte(length))
 	} else {
-		lenByte = 127 | 0x80
-	}
-	header = append(header, lenByte)
-
-	if length > 125 && length <= 65535 {
-		lenBytes := make([]byte, 2)
-		binary.BigEndian.PutUint16(lenBytes, uint16(length))
-		header = append(header, lenBytes...)
-	} else if length > 65535 {
-		lenBytes := make([]byte, 8)
-		binary.BigEndian.PutUint64(lenBytes, uint64(length))
-		header = append(header, lenBytes...)
+		header = append(header, 127|0x80)
+		for i := 7; i >= 0; i-- {
+			header = append(header, byte(length>>(i*8)))
+		}
 	}
 
 	maskKey := make([]byte, 4)
-	rand.Read(maskKey)
+	if _, err := rand.Read(maskKey); err != nil {
+		return err
+	}
 	header = append(header, maskKey...)
 
 	maskedPayload := make([]byte, length)
@@ -127,8 +119,8 @@ func (c *WSClient) writeFrame(payload string) error {
 		maskedPayload[i] = data[i] ^ maskKey[i%4]
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	if _, err := c.rw.Write(header); err != nil {
 		return err
@@ -139,78 +131,202 @@ func (c *WSClient) writeFrame(payload string) error {
 	return c.rw.Flush()
 }
 
-func (c *WSClient) readFrame() ([]byte, error) {
-	header := make([]byte, 2)
-	if _, err := io.ReadFull(c.rw, header); err != nil {
-		return nil, err
-	}
-
-	opCode := header[0] & 0x0F
-	payloadLen := uint64(header[1] & 0x7F)
-
-	switch payloadLen {
-	case 126:
-		extLen := make([]byte, 2)
-		io.ReadFull(c.rw, extLen)
-		payloadLen = uint64(binary.BigEndian.Uint16(extLen))
-	case 127:
-		extLen := make([]byte, 8)
-		io.ReadFull(c.rw, extLen)
-		payloadLen = binary.BigEndian.Uint64(extLen)
-	}
-
-	payload := make([]byte, payloadLen)
-	if payloadLen > 0 {
-		io.ReadFull(c.rw, payload)
-	}
-
-	if opCode == 8 {
-		return nil, errors.New("websocket connection closed by server")
-	}
-
-	return payload, nil
-}
-
 func (c *WSClient) Subscribe(topic string, handler func(message.Message)) error {
+	c.handlersMu.Lock()
+	c.handlers[topic] = handler
+	c.handlersMu.Unlock()
+
 	subMsg, err := json.Marshal(wsCommand{Action: "subscribe", Topic: topic})
 	if err != nil {
 		return err
 	}
-	if err := c.writeFrame(string(subMsg)); err != nil {
-		return err
+	return c.writeFrame(string(subMsg))
+}
+
+func (c *WSClient) Unsubscribe(topic string) error {
+	c.handlersMu.Lock()
+	_, exists := c.handlers[topic]
+	delete(c.handlers, topic)
+	c.handlersMu.Unlock()
+
+	if !exists {
+		return nil
 	}
 
+	unsubMsg, err := json.Marshal(wsCommand{Action: "unsubscribe", Topic: topic})
+	if err != nil {
+		return err
+	}
+	return c.writeFrame(string(unsubMsg))
+}
+
+func (c *WSClient) readLoop() {
+	defer c.wg.Done()
 	for {
 		payload, err := c.readFrame()
 		if err != nil {
-			return err
+			select {
+			case <-c.stop:
+				return
+			default:
+			}
+
+			if recErr := c.handleReconnection(); recErr != nil {
+				return
+			}
+			continue
 		}
 
 		var raw map[string]interface{}
 		if err := json.Unmarshal(payload, &raw); err != nil {
 			continue
 		}
-
 		if _, hasStatus := raw["status"]; hasStatus {
 			continue
 		}
 
 		var msg message.Message
-		if err := json.Unmarshal(payload, &msg); err == nil {
-			if decoded, decErr := base64.StdEncoding.DecodeString(string(msg.Payload)); decErr == nil {
-				msg.Payload = decoded
-			}
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			continue
+		}
 
-			go handler(msg)
+		if decoded, decErr := base64.StdEncoding.DecodeString(string(msg.Payload)); decErr == nil {
+			msg.Payload = decoded
+		}
+
+		c.handlersMu.RLock()
+		handler, exists := c.handlers[msg.Topic]
+		c.handlersMu.RUnlock()
+
+		if exists && handler != nil {
+			handler(msg)
 		}
 	}
 }
 
-func (c *WSClient) Publish(topic string, payload []byte) error {
-	pubMsg, err := json.Marshal(wsCommand{Action: "publish", Topic: topic, Payload: string(payload)})
-	if err != nil {
-		return err
+func (c *WSClient) handleReconnection() error {
+	backoff := 1 * time.Second
+	maxBackoff := 32 * time.Second
+
+	for {
+		select {
+		case <-c.stop:
+			return errors.New("client stopped intentionally")
+		case <-time.After(backoff):
+		}
+
+		c.writeMu.Lock()
+		if c.conn != nil {
+			c.conn.Close()
+		}
+		conn, err := net.Dial("tcp", c.addr)
+		if err != nil {
+			c.writeMu.Unlock()
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		c.conn = conn
+		c.rw = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+		c.writeMu.Unlock()
+
+		if err := c.resubscribeAll(); err != nil {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+		return nil
+	}
+}
+
+func (c *WSClient) resubscribeAll() error {
+	c.handlersMu.RLock()
+	topics := make([]string, 0, len(c.handlers))
+	for topic := range c.handlers {
+		topics = append(topics, topic)
+	}
+	c.handlersMu.RUnlock()
+
+	for _, topic := range topics {
+		subMsg, err := json.Marshal(wsCommand{Action: "subscribe", Topic: topic})
+		if err != nil {
+			return err
+		}
+		if err := c.writeFrame(string(subMsg)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *WSClient) readFrame() ([]byte, error) {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(c.rw, header); err != nil {
+		return nil, err
 	}
 
-	return c.writeFrame(string(pubMsg))
+	b1 := header[1]
+	isMasked := (b1 & 0x80) != 0
+	length := uint64(b1 & 0x7F)
+
+	switch length {
+	case 126:
+		extended := make([]byte, 2)
+		if _, err := io.ReadFull(c.rw, extended); err != nil {
+			return nil, err
+		}
+		length = uint64(extended[0])<<8 | uint64(extended[1])
+	case 127:
+		extended := make([]byte, 8)
+		if _, err := io.ReadFull(c.rw, extended); err != nil {
+			return nil, err
+		}
+		length = 0
+		for i := 0; i < 8; i++ {
+			length = (length << 8) | uint64(extended[i])
+		}
+	}
+
+	if length > MaxFrameSize {
+		return nil, fmt.Errorf("frame size %d exceeds safety limit of %d bytes", length, MaxFrameSize)
+	}
+
+	var maskKey []byte
+	if isMasked {
+		maskKey = make([]byte, 4)
+		if _, err := io.ReadFull(c.rw, maskKey); err != nil {
+			return nil, err
+		}
+	}
+
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(c.rw, payload); err != nil {
+		return nil, err
+	}
+
+	if isMasked {
+		for i := 0; i < len(payload); i++ {
+			payload[i] ^= maskKey[i%4]
+		}
+	}
+
+	return payload, nil
+}
+
+func (c *WSClient) Close() error {
+	c.once.Do(func() {
+		close(c.stop)
+		c.writeMu.Lock()
+		if c.conn != nil {
+			c.conn.Close()
+		}
+		c.writeMu.Unlock()
+	})
+	c.wg.Wait()
+	return nil
 }
