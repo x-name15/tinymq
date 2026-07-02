@@ -2,6 +2,16 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.1.2] - 2026-07-02 — WebSocket Client: Real Handshake, Publish & Control Frames
+
+### Fixed
+- **`client.NewWSClient` never performed the WebSocket upgrade handshake.** The single-read-loop refactor (handlers map, `Unsubscribe`, reconnection backoff, `MaxFrameSize`, keepalive) dialed a raw TCP socket and treated it as an already-established WS connection, skipping the `GET /ws HTTP/1.1` + `Upgrade: websocket` request and the `101 Switching Protocols` validation entirely. The server never promoted the connection, so the client was non-functional against a real broker. `NewWSClient` and `handleReconnection` now share a `dialAndHandshake` helper that generates a `Sec-WebSocket-Key`, sends the upgrade request (with `token=<apiKey>` as a query param, matching dashboard auth), and validates the `101` response before the connection is used.
+- **`WSClient.Publish` was missing.** The refactor dropped the publish method entirely, leaving the client subscribe-only. Re-added `Publish(topic string, payload []byte) error`, reusing the existing `wsCommand`/`writeFrame` path (added a `Payload` field to `wsCommand`).
+- **`readFrame` ignored the WebSocket opcode**, causing Close (`0x8`) and Pong (`0xA`) control frames to be passed into `json.Unmarshal` as if they were data messages. `readFrame` now returns the opcode alongside the payload; `readLoop` triggers immediate reconnection on Close frames and silently discards Pong frames.
+
+### Changed
+- `client.NewWSClient` signature is now `NewWSClient(addr string, apiKey ...string) (*WSClient, error)`, matching the pre-refactor API key support. `apiKey` is stored on `WSClient` so reconnection re-authenticates automatically.
+---
 ## [3.1.1] - 2026-07-02 — Cluster Readiness, Graceful Drain & Bench Tooling
 
 ### Added

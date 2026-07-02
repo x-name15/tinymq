@@ -756,7 +756,7 @@ func main() {
 
 For sub-millisecond latency without HTTP overhead, use the native WebSocket client. This is ideal for high-throughput, long-lived connections.
 
-The v3.1.0 `WSClient` features a **Thread-Safe Single Read-Loop** and an **Automated Reconnection Pipeline**. If the server drops or the network partitions, the SDK automatically cycles sockets and re-subscribes to all active topics using an exponential backoff strategy (1s up to 32s).
+The `WSClient` features a **Thread-Safe Single Read-Loop**, a full **WebSocket upgrade handshake** (`Sec-WebSocket-Key` generation + `101` validation), and an **Automated Reconnection Pipeline**. If the server drops or the network partitions, the SDK automatically re-dials, re-authenticates, and re-subscribes to all active topics using an exponential backoff strategy (1s up to 32s). Close frames from the server trigger immediate reconnection; Pong frames are handled transparently as part of the keepalive.
 
 ```go
 package main
@@ -765,13 +765,16 @@ import (
     "fmt"
     "log"
 
-    "[github.com/x-name15/tinymq/client](https://github.com/x-name15/tinymq/client)"
-    "[github.com/x-name15/tinymq/internal/message](https://github.com/x-name15/tinymq/internal/message)"
+    "github.com/x-name15/tinymq/client"
+    "github.com/x-name15/tinymq/internal/message"
 )
 
 func main() {
-    // NewWSClient automatically dials and boots the auto-reconnect & keepalive loops
-    ws, err := client.NewWSClient("127.0.0.1:7800")
+    // NewWSClient dials, performs the WS upgrade handshake, and boots the
+    // auto-reconnect & keepalive loops. The API key is optional and is
+    // passed as a query param (?token=...) during the handshake, matching
+    // dashboard auth; it's also stored for re-authentication on reconnect.
+    ws, err := client.NewWSClient("127.0.0.1:7800", "optional_api_key")
     if err != nil {
         log.Fatalf("Initial connection failed: %v", err)
     }
@@ -783,17 +786,23 @@ func main() {
         // For massive concurrency, dispatch to your own worker pool here.
         fmt.Printf("Instant Push -> Topic: %s | Payload: %s\n", msg.Topic, string(msg.Payload))
     })
-
     if err != nil {
         log.Fatalf("Subscription failed: %v", err)
     }
 
-    // 2. Dynamic Unsubscribe (Optional)
+    // 2. Publish over the same socket (fire-and-forget, no ack)
+    if err := ws.Publish("iot.sensors.control", []byte(`{"cmd":"calibrate"}`)); err != nil {
+        log.Fatalf("Publish failed: %v", err)
+    }
+
+    // 3. Dynamic Unsubscribe (Optional)
     // ws.Unsubscribe("iot.sensors.*")
 
     select {} // Block forever while WS handles traffic in the background
 }
 ```
+
+> **Note:** `WSClient.Publish` is fire-and-forget over the WS frame — it does not return a broker ack the way the HTTP client's `Publish` does. If you need delivery confirmation, use the HTTP client for that call instead.
 
 ## Configuration & deployment
 
