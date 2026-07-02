@@ -152,29 +152,32 @@ func (c *Client) Subscribe(ctx context.Context, topic string, opts *Subscription
 	return msgs, nil
 }
 
-func (c *Client) CreateTopic(ctx context.Context, topic, policy string, maxQueueSize int) error {
-	payload := map[string]interface{}{
-		"topic":          topic,
-		"policy":         policy,
-		"max_queue_size": maxQueueSize,
+func (c *Client) CreateTopic(ctx context.Context, topic, policy string, retain time.Duration) error {
+	payload := struct {
+		Name   string `json:"name"`
+		Policy string `json:"policy"`
+		Retain string `json:"retain,omitempty"`
+	}{
+		Name:   topic,
+		Policy: policy,
+	}
+	if retain > 0 {
+		payload.Retain = retain.String()
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-
-	req, err := c.req(ctx, http.MethodPost, "/api/topic/create", body)
+	req, err := c.req(ctx, http.MethodPost, "/api/topics", body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to create topic (status %d): %s", resp.StatusCode, string(bodyBytes))
@@ -183,18 +186,24 @@ func (c *Client) CreateTopic(ctx context.Context, topic, policy string, maxQueue
 }
 
 func (c *Client) CreateGroup(ctx context.Context, topic, group string) error {
-	endpoint := fmt.Sprintf("/api/group/create?topic=%s&group=%s", url.QueryEscape(topic), url.QueryEscape(group))
-	req, err := c.req(ctx, http.MethodPost, endpoint, nil)
+	payload := struct {
+		Topic string `json:"topic"`
+		Group string `json:"group"`
+	}{Topic: topic, Group: group}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-
+	req, err := c.req(ctx, http.MethodPost, "/api/groups", body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to create group (status %d): %s", resp.StatusCode, string(bodyBytes))
@@ -203,28 +212,28 @@ func (c *Client) CreateGroup(ctx context.Context, topic, group string) error {
 }
 
 func (c *Client) Peek(ctx context.Context, topic string, limit int) ([]message.Message, error) {
-	endpoint := fmt.Sprintf("/api/peek/%s?limit=%d", url.QueryEscape(topic), limit)
+	endpoint := fmt.Sprintf("/api/queues/peek?queue=%s", url.QueryEscape(topic))
 	req, err := c.req(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("peek failed (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
-
-	var res map[string][]message.Message
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	var messages []message.Message
+	if err := json.NewDecoder(resp.Body).Decode(&messages); err != nil {
 		return nil, err
 	}
-	return res["messages"], nil
+	if limit > 0 && limit < len(messages) {
+		messages = messages[:limit]
+	}
+	return messages, nil
 }
 
 func (c *Client) ClusterStatus(ctx context.Context) (map[string]interface{}, error) {
