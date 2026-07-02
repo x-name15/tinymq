@@ -750,7 +750,13 @@ func (s *Server) handleQueueConsume(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleQueuePeek(w http.ResponseWriter, r *http.Request) {
 	queue := r.URL.Query().Get("queue")
-	msgs := s.broker.Peek(queue, 10)
+	limit := 10
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	msgs := s.broker.Peek(queue, limit)
 	if msgs == nil {
 		msgs = []message.Message{}
 	}

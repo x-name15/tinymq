@@ -212,7 +212,7 @@ func (c *Client) CreateGroup(ctx context.Context, topic, group string) error {
 }
 
 func (c *Client) Peek(ctx context.Context, topic string, limit int) ([]message.Message, error) {
-	endpoint := fmt.Sprintf("/api/queues/peek?queue=%s", url.QueryEscape(topic))
+	endpoint := fmt.Sprintf("/api/queues/peek?queue=%s&limit=%d", url.QueryEscape(topic), limit)
 	req, err := c.req(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -229,9 +229,6 @@ func (c *Client) Peek(ctx context.Context, topic string, limit int) ([]message.M
 	var messages []message.Message
 	if err := json.NewDecoder(resp.Body).Decode(&messages); err != nil {
 		return nil, err
-	}
-	if limit > 0 && limit < len(messages) {
-		messages = messages[:limit]
 	}
 	return messages, nil
 }
