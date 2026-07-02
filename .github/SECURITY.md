@@ -21,7 +21,6 @@ If you believe you have found a security vulnerability in TinyMQ, **please do no
 Instead, report it privately by one of the following methods:
 
 * GitHub Security Advisories (preferred): **Security → Report a vulnerability**
-* Email: **YOUR_EMAIL_HERE**
 
 Please include as much information as possible:
 
