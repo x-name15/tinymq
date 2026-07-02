@@ -2,6 +2,30 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.1.1] - 2026-07-02 — Cluster Readiness, Graceful Drain & Bench Tooling
+
+### Added
+- **`GET /healthz` now reports real cluster readiness.** Previously always returned `200 OK` regardless of election state. Now returns `503 Service Unavailable` with `"status": "electing"` when the node is not leader and has not yet recognized a leader (`LeaderHTTP == ""`), so Kubernetes readiness probes correctly stop routing traffic to a node mid-election instead of treating it as ready.
+- **`POST /api/drain`** — new REST endpoint that marks the node as draining (rejects new requests with `503`) and returns the current in-flight request count. Backs the new `tmq cluster drain <node-url>` CLI command.
+- **`tmq cluster drain <node-url>`** — new CLI subcommand to manually trigger a controlled drain on a specific node ahead of a maintenance restart.
+- **`Server.trackInFlight` middleware** — tracks in-flight HTTP request count via `atomic.Int64` and short-circuits new requests once `draining` is set, wrapping the entire mux.
+- **Verbose graceful shutdown logging.** On `SIGINT`/`SIGTERM`, the broker now logs the number of in-flight HTTP requests and active WebSocket connections being drained before shutting down transports, instead of a single generic "shutting down" line.
+- **`tmq bench --format=json|csv`** — benchmark results (`http` and `nats` protocols) can now be emitted as JSON or CSV in addition to the default text report, enabling CI-based performance regression tracking across releases.
+
+### Fixed
+- **`.dockerignore` did not exclude `.env`.** A local `.env` containing `TINYMQ_API_KEY`/`TINYMQ_CLUSTER_SECRET` would be copied into the Docker build context and persist in the `builder` stage's layer history (though not in the final `scratch`-based image). Added `.env` to `.dockerignore`.
+
+### Changed
+- **`k8s/tinymq-cluster.yaml`**: raised `readinessProbe.failureThreshold` from `3` to `6` (~30s of tolerance) to avoid flapping pod readiness during normal leader elections, now that `/healthz` reflects election state accurately.
+
+### Documentation
+- Updated the `/healthz` reference in `DOCUMENTATION.md` with the new `503`/`"electing"` response shape and a sample payload for mid-election state.
+- Added a new "Drain a Node" section documenting `POST /api/drain`, including its request/response shape and a note clarifying that draining is permanent for the process lifetime (no "undrain" endpoint).
+- Added `tmq create`, `tmq group create/list`, `tmq cluster status`/`tmq cluster peers [--watch]`, `tmq cluster drain <node-url>`, and `tmq bench --format=json|csv` to the `tmq CLI` command reference, with a note on why `cluster drain` requires an explicit `<node-url>` instead of reusing `TINYMQ_URL`.
+- Updated the `k8s/tinymq-cluster.yaml` manifest reference to `readinessProbe.failureThreshold: 6`, with a new "Key design decisions" bullet explaining the increased tolerance now that `/healthz` reflects real election state.
+- Added a build-security note under "Persistent data (Docker Compose)" clarifying that `.dockerignore` excludes `.env` from the Docker build context, including the intermediate `builder` stage.
+
+---
 ## [3.1.0] - 2026-07-01 — SDK Architecture Overhaul & Production Hardening
 
 ### Added

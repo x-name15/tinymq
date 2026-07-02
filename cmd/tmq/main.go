@@ -1079,7 +1079,7 @@ func restoreFromZip(filename, dataDir string) error {
 
 func handleCluster(baseURL string, args []string) {
 	if len(args) == 0 {
-		fmt.Println("Use: tmq cluster status\n    tmq cluster peers [--watch]")
+		fmt.Println("Use: tmq cluster status\n    tmq cluster peers [--watch]\n    tmq cluster drain <node-url>")
 		return
 	}
 	switch args[0] {
@@ -1098,8 +1098,22 @@ func handleCluster(baseURL string, args []string) {
 			}
 		}
 		printClusterStatus(baseURL)
+	case "drain":
+		if len(args) < 2 {
+			fmt.Println("Use: tmq cluster drain <node-url>")
+			return
+		}
+		target := args[1]
+		resp, err := doAuthRequest(http.MethodPost, target+"/api/drain", nil)
+		if err != nil {
+			fmt.Printf("%s[Error] %v%s\n", colorRed, err, colorReset)
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("%s✔ Drain requested on %s%s\n%s\n", colorGreen, target, colorReset, string(body))
 	default:
-		fmt.Println("Use: tmq cluster status\n    tmq cluster peers [--watch]")
+		fmt.Println("Use: tmq cluster status\n    tmq cluster peers [--watch]\n    tmq cluster drain <node-url>")
 	}
 }
 
@@ -1125,9 +1139,10 @@ func printClusterStatus(baseURL string) {
 		return
 	}
 	roleColor := colorGreen
-	if status.Role == "candidate" {
+	switch status.Role {
+	case "candidate":
 		roleColor = colorYellow
-	} else if status.Role == "follower" {
+	case "follower":
 		roleColor = colorBlue
 	}
 	fmt.Printf("\n%sTINYMQ CLUSTER STATUS (%s)%s\n\n", colorBold+colorCyan, baseURL, colorReset)
@@ -1242,6 +1257,7 @@ func printHelp() {
 	fmt.Println("  webhook <add|list>    Manages webhooks for a topic.")
 	fmt.Println("  cluster status        Shows this node's role, term, leader, and peer health.")
 	fmt.Println("  cluster peers         Same view, focused on peers (flag: --watch, refresh every 2s).")
+	fmt.Println("  cluster drain <url>   Marks a specific node as draining (rejects new requests before a controlled restart).")
 	fmt.Println("  group <create|list>   Manages consumer groups for a topic (create <topic> <group> / list <topic>).")
 	fmt.Println("  top                   Live dashboard in your terminal (refreshes every 2s).")
 	fmt.Println("  shell                 Opens an interactive REPL session.")

@@ -89,7 +89,7 @@ spec:
             port: 7800
           initialDelaySeconds: 5
           periodSeconds: 5
-          failureThreshold: 3
+          failureThreshold: 6   
         livenessProbe:
           httpGet:
             path: /healthz

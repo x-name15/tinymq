@@ -333,6 +333,26 @@ curl http://127.0.0.1:7800/api/cluster/status
 
 > `role` can be `"leader"`, `"follower"`, or `"candidate"` (mid-election). This is the same role classification now used internally by `/healthz`'s `cluster_role` field.
 
+### Drain a Node
+
+**Endpoint:** `POST /api/drain`
+
+Marks this node as draining: it immediately stops accepting new requests (returning `503` on every route) while letting in-flight requests finish naturally. Intended for controlled maintenance restarts — call this before terminating a node so existing clients get a clean `503` (and can retry against another node) instead of a hard connection drop.
+
+```bash
+curl -X POST http://127.0.0.1:7800/api/drain
+```
+
+**Response:** `200 OK`
+```json
+{
+  "status": "draining",
+  "in_flight_requests": 3
+}
+```
+
+> Draining is permanent for the lifetime of the process — there is no "undrain" endpoint. Restart the node to resume accepting traffic. This is intentional: drain is meant as the last step before a planned shutdown, not a toggle.
+
 ### Inspect Messages (Peek)
 **Endpoint:** `GET /api/queues/peek?queue={topic}&limit={count}`
 Safely inspects up to `limit` messages in RAM without consuming or deleting them.
@@ -349,7 +369,7 @@ Completely destroys the queue, its consumers, and permanently deletes its underl
 
 **Endpoint:** `GET /healthz`
 
-Returns the broker status. Always `200 OK` when the process is running and accepting requests. Designed for Kubernetes liveness/readiness probes, Docker Compose healthchecks, and load balancers.
+Returns the broker status. In standalone mode, always `200 OK` when the process is running and accepting requests. In cluster mode, returns `503 Service Unavailable` (with `"status": "electing"`) if this node is not the leader and has not yet recognized one — this lets Kubernetes readiness probes correctly stop routing traffic to a node stuck mid-election instead of treating it as ready.
 
 ```bash
 curl http://127.0.0.1:7800/healthz
@@ -359,21 +379,34 @@ curl http://127.0.0.1:7800/healthz
 ```json
 {
   "status": "ok",
-  "version": "2.9.5",
+  "version": "3.1.0",
   "uptime_seconds": 3600
 }
 ```
 
-**Response (cluster mode):**
+**Response (cluster mode, healthy leader/follower):**
 ```json
 {
   "status": "ok",
-  "version": "2.9.5",
+  "version": "3.1.0",
   "uptime_seconds": 3600,
   "cluster_role": "leader",
   "cluster_term": 3
 }
 ```
+
+**Response (cluster mode, mid-election — `503`):**
+```json
+{
+  "status": "electing",
+  "version": "3.1.0",
+  "uptime_seconds": 12,
+  "cluster_role": "follower",
+  "cluster_term": 4
+}
+```
+
+> `cluster_role` can be `"leader"`, `"follower"`, or `"candidate"` — the same classification used by `role` in `/api/cluster/status`.
 
 **Docker Compose healthcheck:**
 ```yaml
@@ -595,9 +628,11 @@ tmq tail <topic>        # Zero-latency live stream monitoring (SSE)
 # Consumer groups
 tmq group create <topic> <group> # Registers a named consumer group binding for a topic
 tmq group list <topic>  # Lists consumer groups bound to a topic
+
 # Cluster
 tmq cluster status       # Shows this node's role, term, leader, and peer health
 tmq cluster peers [--watch] # Same view focused on peers; --watch refreshes every 2s (e.g. for watching a failover live)
+tmq cluster drain <node-url> # Marks a specific node as draining ahead of a controlled restart (calls POST /api/drain)
 
 # Administration
 tmq rm <topic>          # Completely deletes a topic and its .log file
@@ -609,11 +644,12 @@ tmq restore             # Restores a backup archive into ./data (--file, --data-
 # Utilities
 tmq bench <topic>       # Runs a high-concurrency stress test
 tmq bench <topic> --protocol=nats --target=127.0.0.1:40104 # Runs an ultra-fast TCP benchmark
+tmq bench <topic> --format=json # Outputs benchmark results as JSON instead of text (also supports --format=csv)
 tmq backup              # Compresses the ./data folder (--format=zip|tar)
 ```
 
 > **Note:** `tmq cluster status`/`tmq cluster peers` only return useful data when the connected broker is running with clustering enabled (`TINYMQ_CLUSTER_SECRET` / `TINYMQ_CLUSTER_NODES` set). Against a standalone node, they report `Clustering is not enabled on this node (standalone mode).`
----
+> **Note 2:** `tmq cluster drain` takes an explicit `<node-url>` rather than reusing `TINYMQ_URL`/`baseURL` — a drain is a destructive, per-node operation, and requiring the target URL explicitly avoids draining the wrong node by accident.
 
 ## Go SDK integration (advanced)
 
@@ -994,7 +1030,7 @@ spec:
             port: 7800
           initialDelaySeconds: 5
           periodSeconds: 5
-          failureThreshold: 3
+          failureThreshold: 6
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1020,6 +1056,7 @@ spec:
 - **`TINYMQ_CLUSTER_SELF`**: set to the pod's own FQDN via the Downward API (`$(POD_NAME).tinymq-headless:7901`). TinyMQ binds on `0.0.0.0` but must announce a reachable identity to peers — without this, all protocol messages carry `0.0.0.0:7901` as the sender, causing peer discovery rejections and failed elections.
 - **`TINYMQ_CLUSTER_REPLICATE_TIMEOUT: 2s`**: the default `500ms` is too short for DNS resolution latency at pod startup in most managed clusters. Set to `2s` in the manifest; tune up for high-latency cross-zone deployments.
 - **Port 7901 omitted from `tinymq-service`**: the load-balanced Service only exposes HTTP and MQTT. Cluster TCP traffic flows exclusively through the Headless Service DNS entries and must never be exposed externally.
+- **`readinessProbe.failureThreshold: 6`** (~30s of tolerance): since `/healthz` now returns `503` while a node is mid-election (not just when the process is unhealthy), a low threshold would flap pod readiness during normal leader elections. `6` gives enough headroom for a typical election to resolve without marking the pod `NotReady` prematurely.
 
 #### Testing locally with kind
 
@@ -1088,3 +1125,5 @@ services:
 > ```bash
 > mkdir -p ./data && sudo chown -R 10001:10001 ./data
 > ```
+
+> **Build security note:** `.dockerignore` excludes `.env` from the build context, so a local `.env` with secrets (`TINYMQ_API_KEY`, `TINYMQ_CLUSTER_SECRET`) never ends up in any Docker image layer, including the intermediate `builder` stage. Secrets should always be passed at runtime via `--env-file .env` or Kubernetes Secrets, never baked into the image.

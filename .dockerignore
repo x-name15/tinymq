@@ -38,3 +38,6 @@ internal/benchmarks/
 
 #Ignore devContainer files
 .devcontainer/
+
+# Ignore local secrets
+.env

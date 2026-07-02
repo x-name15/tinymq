@@ -166,7 +166,15 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down TinyMQ gracefully...")
+	log.Println("Shutdown signal received. Draining before exit...")
+	restServer.MarkDraining()
+	inFlight := restServer.InFlightCount()
+	activeWS := 0
+	if restServer.WSServer() != nil {
+		activeWS = restServer.WSServer().ActiveClientCount()
+	}
+	log.Printf("Draining %d in-flight HTTP requests and %d active WebSocket connections...\n", inFlight, activeWS)
+
 	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 

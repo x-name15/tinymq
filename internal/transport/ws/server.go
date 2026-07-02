@@ -93,3 +93,9 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	s.AddClient(client)
 	go client.readPump()
 }
+
+func (s *Server) ActiveClientCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.clients)
+}

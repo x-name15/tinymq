@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -52,6 +53,9 @@ type Server struct {
 	startTime   time.Time
 	clusterNode *cluster.Node
 	rateLimiter *ipRateLimiter
+	inFlight    atomic.Int64
+	draining    atomic.Bool
+	wsServer    *ws.Server
 }
 
 func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *Server {
@@ -108,6 +112,7 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 	mux.HandleFunc("/api/queues/delete", s.leaderProxy(s.withAuth(s.handleQueueDelete)))
 	mux.HandleFunc("/api/queues/webhooks", s.leaderProxy(s.withAuth(s.handleGetWebhooks)))
 	mux.HandleFunc("/api/cluster/status", s.withAuth(s.handleClusterStatus))
+	mux.HandleFunc("/api/drain", s.withAuth(s.handleDrain))
 	mux.HandleFunc("/api/groups", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			s.leaderProxy(s.handleGroups)(w, r)
@@ -118,6 +123,7 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 
 	// WebSocket
 	wsServer := ws.NewServer(b)
+	s.wsServer = wsServer
 	mux.HandleFunc("/ws", s.leaderProxy(s.withAuth(wsServer.HandleWS)))
 
 	// ── Rate limiting ──────────────────────────────────────────────────────
@@ -128,7 +134,7 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 
 	s.httpServer = &http.Server{
 		Addr:    ":" + port,
-		Handler: mux,
+		Handler: s.trackInFlight(mux.ServeHTTP),
 	}
 
 	return s
@@ -175,6 +181,27 @@ func (s *Server) leaderProxy(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// --- MIDDLEWARE IN-FLIGHT TRACKING / DRAIN ---
+func (s *Server) trackInFlight(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.draining.Load() {
+			http.Error(w, "Server is draining, please retry against another node", http.StatusServiceUnavailable)
+			return
+		}
+		s.inFlight.Add(1)
+		defer s.inFlight.Add(-1)
+		next(w, r)
+	}
+}
+
+func (s *Server) MarkDraining() {
+	s.draining.Store(true)
+}
+
+func (s *Server) InFlightCount() int64 {
+	return s.inFlight.Load()
 }
 
 func (s *Server) Start() error {
@@ -592,6 +619,25 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
+func (s *Server) WSServer() *ws.Server {
+	return s.wsServer
+}
+
+func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.draining.Store(true)
+	inFlight := s.inFlight.Load()
+	log.Printf("[REST] Drain requested via API. Refusing new requests. %d requests currently in-flight.\n", inFlight)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":             "draining",
+		"in_flight_requests": inFlight,
+	})
+}
+
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	topic := extractTopicFromPath(r, "/stream/")
 	if topic == "" {
@@ -792,21 +838,23 @@ func validateWebhookURL(rawURL string) error {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	uptime := time.Since(s.startTime).Seconds()
-
 	res := map[string]any{
 		"status":         "ok",
 		"version":        s.version,
-		"uptime_seconds": int(uptime),
+		"uptime_seconds": int(time.Since(s.startTime).Seconds()),
 	}
-
+	statusCode := http.StatusOK
 	if s.clusterNode != nil {
-		res["cluster_role"] = s.clusterNode.RoleString()
+		role := s.clusterNode.RoleString()
+		res["cluster_role"] = role
 		res["cluster_term"] = s.clusterNode.GetCurrentTerm()
+		if role != "leader" && s.clusterNode.GetLeaderHTTP() == "" {
+			res["status"] = "electing"
+			statusCode = http.StatusServiceUnavailable
+		}
 	}
-
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(res)
 }
 
