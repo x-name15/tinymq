@@ -642,6 +642,7 @@ tmq webhook add <top> <url> # Registers a new webhook destination
 tmq restore             # Restores a backup archive into ./data (--file, --data-dir)
 
 # Utilities
+tmq doctor              # Runs local sanity checks (data dir, ports, env vars, broker reachability)
 tmq bench <topic>       # Runs a high-concurrency stress test
 tmq bench <topic> --protocol=nats --target=127.0.0.1:40104 # Runs an ultra-fast TCP benchmark
 tmq bench <topic> --format=json # Outputs benchmark results as JSON instead of text (also supports --format=csv)

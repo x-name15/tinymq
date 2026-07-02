@@ -2,6 +2,20 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.1.3] - 2026-07-02 — CLI Package Restructure & Group Command Fix
+
+### Changed
+- **`cmd/tmq` split from a single ~1100-line `main.go` into real Go packages.** No behavior change beyond the fixes below — purely organizational. This same release also ships `tmq doctor` (added as its own file in `cmd/tmq/handle/doctor.go` from the start of this restructure) plus room for future Nivel 1 additions without the monolith growing further.
+  - `cmd/tmq/shared` — HTTP-facing command handlers with no side dependencies: `HandlePublish`, `HandleConsume`, `HandlePeek`, `HandleTail`, `HandleList`, `HandleCreate`, `HandleRm`, `HandleWebhook`, `HandleTop`, `HandleGroup`, plus shared types (`TopicStat`, `CLIMessage`, `ClusterStatusResponse`, etc.), exported color constants, and `DoAuthRequest`.
+  - `cmd/tmq/handle` — commands with heavier or self-contained logic: `HandleBench`, `HandleBackup`, `HandleRestore`, `HandleCluster`, `HandleDoctor`. Imports `shared`.
+  - `cmd/tmq/{main,shell,help}.go` — stay in `package main`; `main.go` (command dispatch), `shell.go` (interactive REPL), `help.go` (`tmq help`). Kept in `main` specifically because `handleShell` calls into both `shared` and `handle`, and `shared`/`handle` cannot import each other without an import cycle.
+
+### Fixed
+- **`tmq shell` — the `group` command ignored typed arguments.** Inside the interactive shell, `group create <topic> <group>` silently used the outer process's `os.Args` instead of the arguments typed into the shell, so it either did nothing or acted on stale args. Now correctly uses the parsed `shellArgs`.
+- **`group` was only reachable from `tmq shell`, not as a top-level command.** `tmq group create <topic> <group>` and `tmq group list <topic>` now work directly from the shell prompt, matching what `tmq help` already documented.
+- **`baseURL` default reconstructed.** An unrelated pre-existing truncation in the default `TINYMQ_URL` fallback (`"http:` with no closing) was corrected to `"http://localhost:7800"` while doing the restructure — confirmed against `tmq help`'s documented default.
+
+---
 ## [3.1.2] - 2026-07-02 — WebSocket Client: Real Handshake, Publish & Control Frames
 
 ### Fixed
