@@ -2,6 +2,28 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.1.4] - 2026-07-09 — Comprehensive Security & Bug Audit Fixes
+
+### Security
+- **Webhook Resource Exhaustion:** Bounded webhook delivery goroutines using a semaphore (max 64 concurrent deliveries) and a per-request `context.Context` (10s timeout) to prevent file descriptor and memory exhaustion under high message load.
+- **WebSocket Auth Token Deprecation:** The `?token=<your_token>` URL parameter for authentication is now officially deprecated, as it exposes secrets in proxy logs and browser history. Standard `Authorization: Bearer` headers are strictly recommended. A warning is now logged if the parameter is used.
+- **REST JSON Injection:** Replaced naive `fmt.Sprintf` JSON construction with safe `json.Marshal` encoding across all HTTP endpoints (`/publish`, idempotency, SSE initial events), preventing payload corruption if topic or queue names contain quotation marks.
+- **Cluster Election Predictability:** Switched the raft election timeout randomizer from `math/rand` to `crypto/rand`, preventing potential split-brain attacks by adversaries capable of observing network timing in older Go runtimes.
+- **Static Assets Path Traversal Hardening:** Added explicit `http.StripPrefix` wrapper around the embedded static file server to prevent any potential path traversal bypasses.
+- **Cluster Sync Deadlines:** Leader-to-Follower synchronization (`requestSync`) now dynamically renews its network deadline *per-message* rather than relying on a single fixed 30-second window. This ensures massive replication payloads don't drop mid-stream.
+
+### Fixed
+- **Critical Requeue Deadlock:** Fixed a blocking `consumerChan <- msg` send inside the broker's main mutex lock that could trigger an unrecoverable deadlock during message requeuing if the consumer disappeared. Replaced with non-blocking `select/default`. Also removed trailing dead code in the same function.
+- **WAL Double Persistence Race:** Corrected the Write-Ahead Log operation ordering. Messages that are directly routed to waiting long-polling consumers are no longer redundantly persisted to disk. This stops "phantom messages" from reappearing after a broker restart.
+- **Storage Double-Open Race:** Fixed a TOCTOU (Time-of-Check to Time-of-Use) race condition in `getOrOpenFile` by extending the internal lock scope, preventing file descriptor leaks when two routines attempted to create the same topic log concurrently.
+- **Unbounded Memory on Consume:** Capped the REST `/consume` endpoint's `?limit=N` parameter to a maximum of `1000`. This prevents malicious or malformed requests (`?limit=9999999`) from exhausting server RAM by forcing the broker to fetch millions of objects simultaneously.
+- **Dangling HTTP Bodies:** Shifted HTTP request `defer r.Body.Close()` invocations higher up in the execution path across multiple handlers. This guarantees bodies are correctly terminated even if JSON decoding fails early, avoiding subtle memory leaks over time.
+- **Capacity Error Message Format:** Queue capacity rejections now accurately reflect the real dynamic limit configured via `TINYMQ_MAX_MESSAGES` instead of hardcoding "100,000" in the error response.
+
+### Performance
+- **Hot-Path Syscall Elimination:** Extracted `os.Getenv("TINYMQ_MAX_MESSAGES")` and `TINYMQ_MAX_TOPICS` from the core publish and topic creation cycles. These limits are now cached strictly at broker startup, removing expensive syscalls from the hot path.
+
+---
 ## [3.1.3] - 2026-07-02 — CLI Package Restructure & Group Command Fix
 
 ### Changed

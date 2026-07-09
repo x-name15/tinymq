@@ -3,13 +3,14 @@ package cluster
 import (
 	"bufio"
 	"crypto/hmac"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"strings"
@@ -597,13 +598,16 @@ func (n *Node) requestSync(leaderAddr string) {
 	body := fmt.Sprintf("SYNC_REQ %s", n.selfAddr())
 	mac := n.signMessage(body)
 	fmt.Fprintf(conn, "%s %s\n", body, mac)
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	const perMessageDeadline = 30 * time.Second
+	conn.SetDeadline(time.Now().Add(perMessageDeadline))
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			return
 		}
+
+		conn.SetDeadline(time.Now().Add(perMessageDeadline))
 		line = strings.TrimSpace(line)
 		parts := strings.Split(line, " ")
 		if len(parts) == 0 || parts[0] == "" {
@@ -687,7 +691,13 @@ func (n *Node) evaluateVote(term int, candidate string) bool {
 
 func (n *Node) electionTimeoutLoop() {
 	for {
-		timeout := time.Duration(3000+rand.Intn(3000)) * time.Millisecond
+		var b [8]byte
+		if _, err := cryptorand.Read(b[:]); err != nil {
+			log.Printf("[Cluster] WARN: crypto/rand failed, using fixed election timeout: %v", err)
+			b[0] = 0x05
+		}
+		randomOffset := int(binary.LittleEndian.Uint64(b[:]) % 3000)
+		timeout := time.Duration(3000+randomOffset) * time.Millisecond
 		timer := time.NewTimer(timeout)
 		select {
 		case <-timer.C:

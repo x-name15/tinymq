@@ -49,8 +49,11 @@ type Broker struct {
 	compiledRegex   map[string]*regexp.Regexp
 	webhooks        map[string][]WebhookConfig
 	webhookClient   *http.Client
+	webhookSem      chan struct{}
 	idempotencyKeys map[string]time.Time
 	bindings        map[string]map[string]bool
+	maxMessages     int
+	maxTopics       int
 	OnPublish       func(topic string, payload []byte) error
 	OnGroupCreate   func(topic, group string) error
 }
@@ -90,6 +93,19 @@ func New(store *storage.DiskStorage) *Broker {
 			return dialer.DialContext(ctx, network, addr)
 		},
 	}
+	
+	maxMsgs := 100000
+	if val := os.Getenv("TINYMQ_MAX_MESSAGES"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			maxMsgs = n
+		}
+	}
+	maxTopics := 10000
+	if val := os.Getenv("TINYMQ_MAX_TOPICS"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			maxTopics = n
+		}
+	}
 	return &Broker{
 		Topics:          make(map[string]*Topic),
 		wildcards:       make(map[string]*Topic),
@@ -97,25 +113,13 @@ func New(store *storage.DiskStorage) *Broker {
 		compiledRegex:   make(map[string]*regexp.Regexp),
 		webhooks:        make(map[string][]WebhookConfig),
 		webhookClient:   &http.Client{Timeout: 10 * time.Second, Transport: secureTransport},
+		// SEC-CRIT-01: Limit concurrent webhook deliveries to prevent goroutine/fd exhaustion.
+		webhookSem:      make(chan struct{}, 64),
 		idempotencyKeys: make(map[string]time.Time),
 		bindings:        make(map[string]map[string]bool),
+		maxMessages:     maxMsgs,
+		maxTopics:       maxTopics,
 	}
-}
-
-func getMaxMessages() int {
-	val := os.Getenv("TINYMQ_MAX_MESSAGES")
-	if limit, err := strconv.Atoi(val); err == nil && limit > 0 {
-		return limit
-	}
-	return 100000
-}
-
-func getMaxTopics() int {
-	val := os.Getenv("TINYMQ_MAX_TOPICS")
-	if limit, err := strconv.Atoi(val); err == nil && limit > 0 {
-		return limit
-	}
-	return 10000
 }
 
 func (b *Broker) compileWildcardRegex(name string) {
@@ -133,7 +137,7 @@ func (b *Broker) getOrCreateTopic(name string) *Topic {
 	if t, ok := b.Topics[name]; ok {
 		return t
 	}
-	if len(b.Topics) >= getMaxTopics() {
+	if len(b.Topics) >= b.maxTopics {
 		return nil
 	}
 	policy := os.Getenv("TINYMQ_DEFAULT_POLICY")
@@ -189,6 +193,7 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 		}
 	}
 }
+
 
 func (b *Broker) Publish(topicName string, payload []byte, headers map[string]string, priority string, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool) error {
 	return b.publishCore(topicName, payload, headers, priority, expiresAt, deliverAt, isBroadcast, false, 0)
@@ -258,12 +263,28 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 	configs := b.webhooks[topicName]
 	b.mu.RUnlock()
 	if len(configs) > 0 {
-		go func(endpoints []WebhookConfig, data []byte) {
-			for _, wh := range endpoints {
-				req, _ := http.NewRequest("POST", wh.URL, bytes.NewBuffer(data))
+		// SEC-CRIT-01: Each webhook delivery runs in its own goroutine, bounded by webhookSem
+		// (max 64 concurrent deliveries). Uses a per-request context so the HTTP timeout is
+		// properly scoped and goroutines cannot accumulate unboundedly under high publish rates.
+		for _, wh := range configs {
+			select {
+			case b.webhookSem <- struct{}{}:
+			default:
+				log.Printf("[Broker] Webhook semaphore full, dropping delivery to %s\n", wh.URL)
+				continue
+			}
+			go func(endpoint WebhookConfig, data []byte) {
+				defer func() { <-b.webhookSem }()
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				req, err := http.NewRequestWithContext(ctx, "POST", endpoint.URL, bytes.NewBuffer(data))
+				if err != nil {
+					log.Printf("[Broker] Failed to build webhook request to %s: %v\n", endpoint.URL, err)
+					return
+				}
 				req.Header.Set("Content-Type", "application/json")
-				if wh.Secret != "" {
-					mac := hmac.New(sha256.New, []byte(wh.Secret))
+				if endpoint.Secret != "" {
+					mac := hmac.New(sha256.New, []byte(endpoint.Secret))
 					mac.Write(data)
 					signature := hex.EncodeToString(mac.Sum(nil))
 					req.Header.Set("X-TinyMQ-Signature", "sha256="+signature)
@@ -272,10 +293,10 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 				if err == nil {
 					resp.Body.Close()
 				} else {
-					log.Printf("Webhook delivery failed to %s: %v\n", wh.URL, err)
+					log.Printf("[Broker] Webhook delivery failed to %s: %v\n", endpoint.URL, err)
 				}
-			}
-		}(configs, payload)
+			}(wh, payload)
+		}
 	}
 	t.mu.Lock()
 	spyCount := len(t.spies)
@@ -333,11 +354,10 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		t.mu.Unlock()
 		return errors.New("topic was concurrently deleted")
 	}
-	if !isBroadcast && b.storage != nil {
-		if err := b.storage.AppendPut(topicName, msg); err != nil {
-			log.Printf("Error persisting PUT record: %v\n", err)
-		}
-	}
+	// BUG-HIGH-01: WAL persistence is deferred until we confirm the message stays in the
+	// queue (i.e. no waiting consumer takes it directly). This prevents WAL entries that
+	// are never Ack'd on direct delivery, which would cause phantom messages after restart.
+	// Check waiting consumers on matching wildcard topics first.
 	for _, wildcardT := range matchingWildcards {
 		wildcardT.mu.Lock()
 		if len(wildcardT.waitingConsumers) > 0 {
@@ -375,6 +395,12 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			t.mu.Lock()
 		}
 	}
+	// No waiting consumer took the message: persist to WAL and enqueue in memory.
+	if !isBroadcast && b.storage != nil {
+		if err := b.storage.AppendPut(topicName, msg); err != nil {
+			log.Printf("Error persisting PUT record: %v\n", err)
+		}
+	}
 	var targetQueue *[]message.Message
 	switch priority {
 	case "high":
@@ -385,7 +411,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		targetQueue = &t.Messages
 	}
 	totalActiveMessages := len(t.HighMessages) + len(t.Messages) + len(t.LowMessages)
-	if totalActiveMessages >= getMaxMessages() {
+	if totalActiveMessages >= b.maxMessages {
 		if t.Policy == "drop-oldest" {
 			var oldestMsg message.Message
 			if len(t.LowMessages) > 0 {
@@ -404,7 +430,8 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			log.Printf("[RingBuffer] Queue '%s' full. Evicted oldest message: %s\n", topicName, oldestMsg.ID)
 		} else {
 			t.mu.Unlock()
-			return errors.New("queue capacity reached (max 100,000 messages)")
+			// BUG-LOW-03: Use actual configured limit in error message instead of hardcoded value.
+			return fmt.Errorf("queue capacity reached (max %d messages)", b.maxMessages)
 		}
 	}
 	*targetQueue = append(*targetQueue, msg)
@@ -599,13 +626,9 @@ func (b *Broker) Requeue(msg message.Message) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.waitingConsumers) > 0 {
-		consumerChan := t.waitingConsumers[0]
-		t.waitingConsumers[0] = nil
-		t.waitingConsumers = t.waitingConsumers[1:]
-		consumerChan <- msg
-		return
-	}
+	// SEC-CRIT-02: Fixed — previously had a blocking send (consumerChan <- msg) under the
+	// mutex which could deadlock, plus unreachable dead code below it. Now uses select/default
+	// to avoid blocking. Only one branch is needed.
 	if len(t.waitingConsumers) > 0 {
 		consumerChan := t.waitingConsumers[0]
 		t.waitingConsumers[0] = nil
@@ -644,7 +667,7 @@ func (b *Broker) CreateTopic(topicName string, policy string, retention time.Dur
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.Topics) >= getMaxTopics() {
+	if len(b.Topics) >= b.maxTopics {
 		return errors.New("broker maximum topic limit reached")
 	}
 	if _, exists := b.Topics[topicName]; exists {

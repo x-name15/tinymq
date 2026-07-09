@@ -121,7 +121,7 @@ curl -X GET "http://127.0.0.1:7800/consume/orders.eu?group=invoices&timeout=10s"
 ```
 
 **Response (200):**
-If `limit=1` (Default), returns a single JSON object. If `limit > 1`, returns a JSON Array.
+If `limit=1` (Default), returns a single JSON object. If `limit > 1` (up to a maximum of `1000`), returns a JSON Array.
 
 ```json
 {
@@ -171,8 +171,7 @@ curl "http://127.0.0.1:7800/consume/orders.eu?peek=true&limit=5"
 
 TinyMQ natively implements the RFC 6455 WebSocket protocol to offer a single, bidirectional TCP connection for sub-millisecond publishing and subscribing. 
 
-**Authentication:** If `TINYMQ_API_KEY` is enabled, you must authenticate the connection. Browsers can pass the token via URL parameter: `ws://127.0.0.1:7800/ws?token=<your_token>`. Programmatic clients can use standard HTTP `Authorization: Bearer <token>` headers during the initial handshake.
-
+**Authentication:** If `TINYMQ_API_KEY` is enabled, you must authenticate the connection. All clients should use standard HTTP `Authorization: Bearer <token>` headers during the initial handshake. *(Note: Passing the token via URL parameter `?token=<your_token>` is supported for legacy compatibility but is **deprecated** as it exposes credentials in proxy logs and browser history).*
 Once connected, communication uses a simple JSON Command structure (`TMP-WS`). 
 
 **Commands:**

@@ -124,21 +124,16 @@ func (s *DiskStorage) writeRecord(topic string, record LogRecord) error {
 
 func (s *DiskStorage) getOrOpenFile(topic string) (*os.File, error) {
 	s.mapMu.Lock()
-	file, exists := s.activeFiles[topic]
-	s.mapMu.Unlock()
-	if exists {
+	defer s.mapMu.Unlock()
+	if file, exists := s.activeFiles[topic]; exists {
 		return file, nil
 	}
-
 	filename := logFilePath(s.dataDir, topic)
 	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
 	}
-
-	s.mapMu.Lock()
 	s.activeFiles[topic] = file
-	s.mapMu.Unlock()
 	return file, nil
 }
 

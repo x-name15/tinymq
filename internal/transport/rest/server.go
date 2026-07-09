@@ -82,7 +82,7 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 
 	// ── Routes with Auth (read-only, no proxy needed) ─────────────────
 	mux.HandleFunc("/dashboard", s.withAuth(s.handleDashboard))
-	mux.Handle("/static/", s.withAuth(http.FileServerFS(staticFS).ServeHTTP))
+	mux.Handle("/static/", s.withAuth(http.StripPrefix("/static/", http.FileServerFS(staticFS)).ServeHTTP))
 	mux.HandleFunc("/metrics", s.withAuth(s.handleMetrics))
 
 	mux.HandleFunc("/api/stats", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
@@ -266,6 +266,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		// 3. Query Param (WebSocket)
 		if got := r.URL.Query().Get("token"); got != "" {
+			log.Printf("[AUTH] WARNING: token passed as query param from %s — use Authorization header instead", r.RemoteAddr)
 			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
 				next(w, r)
 				return
@@ -324,7 +325,11 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if iKey != "" && s.broker.IsIdempotent(iKey) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"status": "ignored", "reason": "idempotency_key_exists", "topic": "%s"}`, topic)))
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "ignored",
+			"reason": "idempotency_key_exists",
+			"topic":  topic,
+		})
 		return
 	}
 
@@ -370,7 +375,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	fmt.Fprintf(w, "{\"status\": \"accepted\", \"topic\": \"%s\"}\n", topic)
+	json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "topic": topic})
 }
 
 func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
@@ -388,6 +393,10 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 	limit := 1
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			const maxLimit = 1000
+			if parsedLimit > maxLimit {
+				parsedLimit = maxLimit
+			}
 			limit = parsedLimit
 		}
 	}
@@ -489,12 +498,12 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	defer r.Body.Close()
 	var msg message.Message
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		http.Error(w, "Invalid message format", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
 
 	if msg.ID == "" || msg.Topic == "" || !s.broker.IsValidTopicName(msg.Topic) || !s.broker.TopicExists(msg.Topic) {
 		http.Error(w, "Invalid or missing topic/id", http.StatusBadRequest)
@@ -517,11 +526,12 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 		URL    string `json:"url"`
 		Secret string `json:"secret,omitempty"`
 	}
+
+	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.URL == "" {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
 
 	if err := validateWebhookURL(payload.URL); err != nil {
 		http.Error(w, fmt.Sprintf("Security rejection: %v", err), http.StatusForbidden)
@@ -539,11 +549,12 @@ func (s *Server) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		Policy string `json:"policy"`
 		Retain string `json:"retain"`
 	}
+
+	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
 
 	if payload.Policy == "" {
 		payload.Policy = os.Getenv("TINYMQ_DEFAULT_POLICY")
@@ -663,7 +674,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	defer s.broker.RemoveSpy(topic, spyChan)
 
-	fmt.Fprintf(w, "data: {\"status\":\"connected\",\"topic\":\"%s\"}\n\n", topic)
+	initialEvent, _ := json.Marshal(map[string]string{"status": "connected", "topic": topic})
+	fmt.Fprintf(w, "data: %s\n\n", initialEvent)
 	flusher.Flush()
 
 	for {
@@ -721,7 +733,7 @@ func (s *Server) handleQueuePublish(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte(fmt.Sprintf(`{"status": "accepted", "queue": "%s"}`, req.Queue)))
+	json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "queue": req.Queue})
 }
 
 func (s *Server) handleQueueConsume(w http.ResponseWriter, r *http.Request) {
