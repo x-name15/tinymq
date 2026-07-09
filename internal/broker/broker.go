@@ -93,7 +93,7 @@ func New(store *storage.DiskStorage) *Broker {
 			return dialer.DialContext(ctx, network, addr)
 		},
 	}
-	
+
 	maxMsgs := 100000
 	if val := os.Getenv("TINYMQ_MAX_MESSAGES"); val != "" {
 		if n, err := strconv.Atoi(val); err == nil && n > 0 {
@@ -107,12 +107,12 @@ func New(store *storage.DiskStorage) *Broker {
 		}
 	}
 	return &Broker{
-		Topics:          make(map[string]*Topic),
-		wildcards:       make(map[string]*Topic),
-		storage:         store,
-		compiledRegex:   make(map[string]*regexp.Regexp),
-		webhooks:        make(map[string][]WebhookConfig),
-		webhookClient:   &http.Client{Timeout: 10 * time.Second, Transport: secureTransport},
+		Topics:        make(map[string]*Topic),
+		wildcards:     make(map[string]*Topic),
+		storage:       store,
+		compiledRegex: make(map[string]*regexp.Regexp),
+		webhooks:      make(map[string][]WebhookConfig),
+		webhookClient: &http.Client{Timeout: 10 * time.Second, Transport: secureTransport},
 		// SEC-CRIT-01: Limit concurrent webhook deliveries to prevent goroutine/fd exhaustion.
 		webhookSem:      make(chan struct{}, 64),
 		idempotencyKeys: make(map[string]time.Time),
@@ -193,7 +193,6 @@ func (b *Broker) LoadExistingTopics(topicNames []string) {
 		}
 	}
 }
-
 
 func (b *Broker) Publish(topicName string, payload []byte, headers map[string]string, priority string, expiresAt *time.Time, deliverAt *time.Time, isBroadcast bool) error {
 	return b.publishCore(topicName, payload, headers, priority, expiresAt, deliverAt, isBroadcast, false, 0)
