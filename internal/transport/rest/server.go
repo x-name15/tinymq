@@ -110,6 +110,7 @@ func NewServer(b *broker.Broker, port string, version string, c *cluster.Node) *
 	mux.HandleFunc("/api/queues/peek", s.leaderProxy(s.withAuth(s.handleQueuePeek)))
 	mux.HandleFunc("/api/queues/purge", s.leaderProxy(s.withAuth(s.handleQueuePurge)))
 	mux.HandleFunc("/api/queues/delete", s.leaderProxy(s.withAuth(s.handleQueueDelete)))
+	mux.HandleFunc("/api/queues/redrive", s.leaderProxy(s.withAuth(s.handleQueueRedrive)))
 	mux.HandleFunc("/api/queues/webhooks", s.leaderProxy(s.withAuth(s.handleGetWebhooks)))
 	mux.HandleFunc("/api/cluster/status", s.withAuth(s.handleClusterStatus))
 	mux.HandleFunc("/api/drain", s.withAuth(s.handleDrain))
@@ -836,6 +837,25 @@ func (s *Server) handleGetWebhooks(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(urls)
+}
+
+func (s *Server) handleQueueRedrive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	queue := r.URL.Query().Get("queue")
+	if queue == "" {
+		http.Error(w, "Queue parameter required", http.StatusBadRequest)
+		return
+	}
+	redriven, err := s.broker.RedriveDLQ(queue)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "success", "redriven_messages": redriven})
 }
 
 func validateWebhookURL(rawURL string) error {

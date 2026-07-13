@@ -52,7 +52,7 @@ You can interact with TinyMQ via `curl`, Go, Python, Node.js, Rust, etc. Payload
 **Endpoint:** `POST /publish/{topic}`
 
 **Query Parameters (Optional):**
-- `ttl` (e.g., `30s`, `1h`): Time-To-Live. The message will be destroyed if not consumed within this window.
+- `ttl` (e.g., `30s`, `1h`): Time-To-Live. The message will be destroyed if not consumed within this window. *(Note: TinyMQ runs an Active Garbage Collector every 60 seconds to automatically free memory from expired messages, even if a topic has no active consumers).*
 - `delay` (e.g., `5m`, `10s`): Delays the delivery. The message will be hidden from consumers until this time passes.
 - `broadcast` (`true`): Ephemeral Fan-out. Dispatches the message to all currently waiting consumers simultaneously without persisting it to disk.
 - `priority` (`high` | `normal` | `low`): Message priority. Default is `normal`. Within a topic, `high` messages are always consumed before `normal`, and `normal` before `low`. Fully retrocompatible — existing consumers require no changes.
@@ -364,6 +364,10 @@ Empties a queue of all messages but keeps the queue and its metadata active.
 **Endpoint:** `DELETE /api/queues/delete?queue={topic}`
 Completely destroys the queue, its consumers, and permanently deletes its underlying `.log` file.
 
+### Redrive Dead Letter Queue (DLQ)
+**Endpoint:** `POST /api/queues/redrive?queue={topic}`
+Atomically extracts all messages from `<topic>.dlq` and republishes them back into the main `<topic>`, resetting their retry counters to `0`. Useful for replaying failed messages after a consumer outage has been resolved.
+
 ### Health Check
 
 **Endpoint:** `GET /healthz`
@@ -636,6 +640,7 @@ tmq cluster drain <node-url> # Marks a specific node as draining ahead of a cont
 # Administration
 tmq rm <topic>          # Completely deletes a topic and its .log file
 tmq purge <topic>       # Empties a topic without deleting it
+tmq dlq redrive <topic> # Redrives all dead-lettered messages from <topic>.dlq back to <topic>
 tmq webhook list <top>  # Lists registered webhooks for a topic
 tmq webhook add <top> <url> # Registers a new webhook destination
 tmq restore             # Restores a backup archive into ./data (--file, --data-dir)

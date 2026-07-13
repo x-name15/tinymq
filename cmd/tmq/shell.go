@@ -57,6 +57,12 @@ func handleShell(baseURL string) {
 			handle.HandleCluster(baseURL, shellArgs)
 		case "group":
 			shared.HandleGroup(baseURL, shellArgs)
+		case "dlq":
+			if len(shellArgs) < 2 || shellArgs[0] != "redrive" {
+				fmt.Println("Use: dlq redrive <topic>")
+			} else {
+				shared.HandleRedrive(baseURL, shellArgs[1])
+			}
 		case "restore":
 			handle.HandleRestore(shellArgs)
 		case "bench":

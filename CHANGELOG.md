@@ -2,6 +2,20 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.1.5] - 2026-07-13 — Operational Hardening: Active GC & DLQ Redrive
+
+### Added
+- **DLQ Redrive Pipeline:** Introduced a seamless way to manually replay dead-lettered messages back into their main queues after downstream consumer outages.
+  - New CLI command: `tmq dlq redrive <topic>` fully automates extracting messages from `<topic>.dlq`, resetting their retry counters, acknowledging them from the DLQ disk log, and republishing them to the main topic.
+  - New REST API endpoint: `POST /api/queues/redrive?queue=<topic>` for remote operation.
+- **Active Memory Garbage Collection (GC):** Messages published with an `ExpiresAt` (TTL) are now proactively purged from memory every 60 seconds by a background goroutine inside the broker. Previously, TTL was only evaluated lazily upon active consumption, which could cause memory leaks if a topic was entirely abandoned by its consumers.
+
+### Documentation
+- Updated `docs/DOCUMENTATION.md` to include the new Active GC mechanism under the TTL section.
+- Added the `POST /api/queues/redrive` endpoint to the HTTP API reference.
+- Added the `tmq dlq redrive <topic>` command to the CLI cheatsheet.
+
+---
 ## [3.1.4] - 2026-07-09 — Comprehensive Security & Bug Audit Fixes
 
 ### Security

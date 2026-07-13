@@ -27,6 +27,7 @@ func printHelp() {
 	fmt.Println("  cluster peers         Same view, focused on peers (flag: --watch, refresh every 2s).")
 	fmt.Println("  cluster drain <url>   Marks a specific node as draining (rejects new requests before a controlled restart).")
 	fmt.Println("  group <create|list>   Manages consumer groups for a topic (create <topic> <group> / list <topic>).")
+	fmt.Println("  dlq redrive <queue>   Redrives all dead-lettered messages from <queue>.dlq back to <queue>.")
 	fmt.Println("  top                   Live dashboard in your terminal (refreshes every 2s).")
 	fmt.Println("  shell                 Opens an interactive REPL session.")
 	fmt.Println("  doctor                Runs local sanity checks (data dir, ports, env vars, broker reachability).")

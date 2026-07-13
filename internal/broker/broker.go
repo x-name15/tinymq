@@ -106,20 +106,29 @@ func New(store *storage.DiskStorage) *Broker {
 			maxTopics = n
 		}
 	}
-	return &Broker{
+	b := &Broker{
 		Topics:        make(map[string]*Topic),
 		wildcards:     make(map[string]*Topic),
 		storage:       store,
 		compiledRegex: make(map[string]*regexp.Regexp),
 		webhooks:      make(map[string][]WebhookConfig),
 		webhookClient: &http.Client{Timeout: 10 * time.Second, Transport: secureTransport},
-		// SEC-CRIT-01: Limit concurrent webhook deliveries to prevent goroutine/fd exhaustion.
 		webhookSem:      make(chan struct{}, 64),
 		idempotencyKeys: make(map[string]time.Time),
 		bindings:        make(map[string]map[string]bool),
 		maxMessages:     maxMsgs,
 		maxTopics:       maxTopics,
 	}
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			b.purgeExpiredMessages()
+		}
+	}()
+
+	return b
 }
 
 func (b *Broker) compileWildcardRegex(name string) {
@@ -640,6 +649,90 @@ func (b *Broker) Requeue(msg message.Message) {
 		}
 	}
 	t.Messages = append(t.Messages, msg)
+}
+
+func (b *Broker) purgeExpiredMessages() {
+	b.mu.RLock()
+	var topics []*Topic
+	for _, t := range b.Topics {
+		topics = append(topics, t)
+	}
+	b.mu.RUnlock()
+
+	now := time.Now()
+	for _, t := range topics {
+		t.mu.Lock()
+
+		purge := func(queue *[]message.Message) []string {
+			var expiredIDs []string
+			var active []message.Message
+			for _, msg := range *queue {
+				if msg.ExpiresAt != nil && msg.ExpiresAt.Before(now) {
+					expiredIDs = append(expiredIDs, msg.ID)
+				} else {
+					active = append(active, msg)
+				}
+			}
+			*queue = active
+			return expiredIDs
+		}
+
+		var allExpired []string
+		allExpired = append(allExpired, purge(&t.HighMessages)...)
+		allExpired = append(allExpired, purge(&t.Messages)...)
+		allExpired = append(allExpired, purge(&t.LowMessages)...)
+		t.mu.Unlock()
+
+		if len(allExpired) > 0 {
+			b.ackExpired(t.Name, allExpired)
+			log.Printf("[Broker] Active GC purged %d expired messages from topic '%s'\n", len(allExpired), t.Name)
+		}
+	}
+}
+
+func (b *Broker) RedriveDLQ(targetTopic string) (int, error) {
+	dlqName := targetTopic
+	if !strings.HasSuffix(dlqName, ".dlq") {
+		dlqName = targetTopic + ".dlq"
+	} else {
+		targetTopic = strings.TrimSuffix(dlqName, ".dlq")
+	}
+
+	b.mu.RLock()
+	dlqT, ok := b.Topics[dlqName]
+	b.mu.RUnlock()
+
+	if !ok {
+		return 0, fmt.Errorf("DLQ topic '%s' not found", dlqName)
+	}
+
+	dlqT.mu.Lock()
+	count := len(dlqT.Messages)
+	if count == 0 {
+		dlqT.mu.Unlock()
+		return 0, nil
+	}
+
+	msgsToRedrive := make([]message.Message, count)
+	copy(msgsToRedrive, dlqT.Messages)
+	dlqT.Messages = nil
+	dlqT.mu.Unlock()
+
+	redriven := 0
+	for _, msg := range msgsToRedrive {
+		if b.storage != nil {
+			b.storage.AppendAck(dlqName, msg.ID)
+		}
+
+		err := b.publishCore(targetTopic, msg.Payload, msg.Headers, "normal", msg.ExpiresAt, nil, false, false, 0)
+		if err != nil {
+			log.Printf("[Broker] Failed to redrive message %s: %v\n", msg.ID, err)
+		} else {
+			redriven++
+		}
+	}
+
+	return redriven, nil
 }
 
 func (b *Broker) RegisterWebhook(topicName string, callbackURL string, secret string) error {

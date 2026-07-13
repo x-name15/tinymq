@@ -51,6 +51,12 @@ func main() {
 		shared.HandleCreate(baseURL, os.Args[2:])
 	case "group":
 		shared.HandleGroup(baseURL, os.Args[2:])
+	case "dlq":
+		if len(os.Args) < 4 || os.Args[2] != "redrive" {
+			fmt.Println("Use: tmq dlq redrive <topic>")
+			os.Exit(1)
+		}
+		shared.HandleRedrive(baseURL, os.Args[3])
 	case "doctor":
 		handle.HandleDoctor(baseURL, os.Args[2:])
 	case "help", "-h", "--help":

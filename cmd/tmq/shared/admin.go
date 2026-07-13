@@ -243,3 +243,22 @@ func HandleTop(baseURL string) {
 		time.Sleep(2 * time.Second)
 	}
 }
+
+func HandleRedrive(baseURL string, topic string) {
+	resp, err := DoAuthRequest(http.MethodPost, baseURL+"/api/queues/redrive?queue="+url.QueryEscape(topic), nil)
+	if err != nil {
+		fmt.Printf("%s[Error] Error connecting to the broker: %v%s\n", ColorRed, err, ColorReset)
+		return
+	}
+	defer resp.Body.Close()
+	
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK {
+		var result map[string]any
+		json.Unmarshal(body, &result)
+		redriven := result["redriven_messages"]
+		fmt.Printf("%s✔ Successfully redriven %v messages from %s.dlq back to %s!%s\n", ColorGreen, redriven, topic, topic, ColorReset)
+	} else {
+		fmt.Printf("%s[Error] %s%s\n", ColorRed, strings.TrimSpace(string(body)), ColorReset)
+	}
+}
