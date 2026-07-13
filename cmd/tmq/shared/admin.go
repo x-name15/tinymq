@@ -251,7 +251,7 @@ func HandleRedrive(baseURL string, topic string) {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusOK {
 		var result map[string]any

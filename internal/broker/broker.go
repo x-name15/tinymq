@@ -107,12 +107,12 @@ func New(store *storage.DiskStorage) *Broker {
 		}
 	}
 	b := &Broker{
-		Topics:        make(map[string]*Topic),
-		wildcards:     make(map[string]*Topic),
-		storage:       store,
-		compiledRegex: make(map[string]*regexp.Regexp),
-		webhooks:      make(map[string][]WebhookConfig),
-		webhookClient: &http.Client{Timeout: 10 * time.Second, Transport: secureTransport},
+		Topics:          make(map[string]*Topic),
+		wildcards:       make(map[string]*Topic),
+		storage:         store,
+		compiledRegex:   make(map[string]*regexp.Regexp),
+		webhooks:        make(map[string][]WebhookConfig),
+		webhookClient:   &http.Client{Timeout: 10 * time.Second, Transport: secureTransport},
 		webhookSem:      make(chan struct{}, 64),
 		idempotencyKeys: make(map[string]time.Time),
 		bindings:        make(map[string]map[string]bool),
