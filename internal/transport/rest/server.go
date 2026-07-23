@@ -391,7 +391,7 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Topic is required", http.StatusBadRequest)
 		return
 	}
-	
+
 	filterKey := r.URL.Query().Get("filter_key")
 	filterVal := r.URL.Query().Get("filter_val")
 
@@ -453,7 +453,7 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	
+
 	if ok && filterKey != "" {
 		var filtered []message.Message
 		for _, msg := range msgs {
@@ -673,7 +673,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Topic required", http.StatusBadRequest)
 		return
 	}
-	
+
 	filterKey := r.URL.Query().Get("filter_key")
 	filterVal := r.URL.Query().Get("filter_val")
 

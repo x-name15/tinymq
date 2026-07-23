@@ -274,7 +274,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		t.mu.Unlock()
 		return errors.New("topic was concurrently deleted")
 	}
-	
+
 	if !isBroadcast && b.storage != nil {
 		if err := b.storage.AppendPut(topicName, msg); err != nil {
 			log.Printf("Error persisting PUT record: %v\n", err)
@@ -351,7 +351,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 				}(wh, payload)
 			}
 		}
-		
+
 		t.mu.Lock()
 		spyCount := len(t.spies)
 		for _, spy := range t.spies {
@@ -364,7 +364,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 		if spyCount > 0 {
 			log.Printf("[Broker] Delivered message %s to %d spies on topic '%s'\n", msg.ID, spyCount, t.Name)
 		}
-		
+
 		for _, wildcardT := range matchingWildcards {
 			wildcardT.mu.Lock()
 			for _, spy := range wildcardT.spies {
@@ -375,7 +375,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			}
 			wildcardT.mu.Unlock()
 		}
-		
+
 		if isBroadcast {
 			var broadcastChannels []chan message.Message
 			for _, wildcardT := range matchingWildcards {
@@ -419,7 +419,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 				wildcardT.mu.Unlock()
 			}
 		}
-		
+
 		t.mu.Lock()
 		var pendingConsumer chan message.Message
 		if len(t.waitingConsumers) > 0 {
@@ -428,7 +428,7 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			t.waitingConsumers = t.waitingConsumers[1:]
 		}
 		t.mu.Unlock()
-		
+
 		if pendingConsumer != nil {
 			select {
 			case pendingConsumer <- msg:
