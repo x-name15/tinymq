@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes of the proyect will be documented on this file.
----
+
 ## [3.1.6] - 2026-07-23 — Smart Routing, Super Dashboard & Delayed Messages
 
 ### Added
