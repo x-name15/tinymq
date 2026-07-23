@@ -2,7 +2,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go)](https://go.dev/)
 [![Go Report Card](https://goreportcard.com/badge/github.com/x-name15/tinymq?style=flat-square)](https://goreportcard.com/report/github.com/x-name15/tinymq)
 [![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg?style=flat-square)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/Release-v3.1.5-green?style=flat-square)](https://github.com/x-name15/tinymq/releases)
+[![Latest Release](https://img.shields.io/badge/Release-v3.1.6-green?style=flat-square)](https://github.com/x-name15/tinymq/releases)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/x-name15/tinymq/release.yaml?style=flat-square&logo=githubactions&logoColor=white)](https://github.com/x-name15/tinymq/actions)
 [![Docker Image Size](https://img.shields.io/badge/Image_Size-~15MB-2496ED?style=flat-square&logo=docker)](https://github.com/x-name15/tinymq/pkgs/container/tinymq)
 [![Docker](https://img.shields.io/badge/Docker-Engine%20%2F%20Desktop-2496ED?style=flat-square&logo=docker)](https://www.docker.com/)
