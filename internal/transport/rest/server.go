@@ -26,6 +26,7 @@ import (
 
 	"github.com/x-name15/tinymq/internal/broker"
 	"github.com/x-name15/tinymq/internal/cluster"
+	"github.com/x-name15/tinymq/internal/helper"
 	"github.com/x-name15/tinymq/internal/message"
 	"github.com/x-name15/tinymq/internal/transport/ws"
 )
@@ -390,6 +391,9 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Topic is required", http.StatusBadRequest)
 		return
 	}
+	
+	filterKey := r.URL.Query().Get("filter_key")
+	filterVal := r.URL.Query().Get("filter_val")
 
 	limit := 1
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
@@ -447,6 +451,19 @@ func (s *Server) handleConsume(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			s.broker.RemoveWaitingConsumer(topic, notifyChan)
 			return
+		}
+	}
+	
+	if ok && filterKey != "" {
+		var filtered []message.Message
+		for _, msg := range msgs {
+			if helper.MatchJSONFilter(msg.Payload, filterKey, filterVal) {
+				filtered = append(filtered, msg)
+			}
+		}
+		msgs = filtered
+		if len(msgs) == 0 {
+			ok = false
 		}
 	}
 
@@ -656,6 +673,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Topic required", http.StatusBadRequest)
 		return
 	}
+	
+	filterKey := r.URL.Query().Get("filter_key")
+	filterVal := r.URL.Query().Get("filter_val")
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -684,6 +704,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case msg := <-spyChan:
+			if filterKey != "" && !helper.MatchJSONFilter(msg.Payload, filterKey, filterVal) {
+				continue
+			}
 			bytes, _ := json.Marshal(msg)
 			fmt.Fprintf(w, "data: %s\n\n", string(bytes))
 			flusher.Flush()

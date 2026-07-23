@@ -87,5 +87,16 @@
     "paletteNav": "navigate",
     "paletteOpen": "peek",
     "paletteClose": "close",
-    "paletteNoResults": "No results"
+    "paletteNoResults": "No results",
+    "clusterTopology": "Cluster Topology",
+    "loading": "Loading...",
+    "publishMessage": "Publish Message",
+    "topicPlaceholder": "Topic name (e.g. events)",
+    "payloadJsonPlaceholder": "Payload JSON (e.g. {\"status\": \"ok\"})",
+    "priorityNormal": "Priority: Normal",
+    "priorityHigh": "Priority: High",
+    "priorityLow": "Priority: Low",
+    "ttlPlaceholder": "TTL (e.g. 1h)",
+    "delayPlaceholder": "Delay (e.g. 5m)",
+    "publishBtn": "Publish"
 }

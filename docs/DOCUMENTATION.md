@@ -53,7 +53,7 @@ You can interact with TinyMQ via `curl`, Go, Python, Node.js, Rust, etc. Payload
 
 **Query Parameters (Optional):**
 - `ttl` (e.g., `30s`, `1h`): Time-To-Live. The message will be destroyed if not consumed within this window. *(Note: TinyMQ runs an Active Garbage Collector every 60 seconds to automatically free memory from expired messages, even if a topic has no active consumers).*
-- `delay` (e.g., `5m`, `10s`): Delays the delivery. The message will be hidden from consumers until this time passes.
+- `delay` (e.g., `5m`, `10s`): Delays the delivery. The message is persisted to the Write-Ahead Log immediately but will bypass all Webhooks, Spies, and Waiting Consumers until the specified time has elapsed. Once mature, a background scheduler automatically injects it into active consumer flows exactly as if it was published at that second.
 - `broadcast` (`true`): Ephemeral Fan-out. Dispatches the message to all currently waiting consumers simultaneously without persisting it to disk.
 - `priority` (`high` | `normal` | `low`): Message priority. Default is `normal`. Within a topic, `high` messages are always consumed before `normal`, and `normal` before `low`. Fully retrocompatible — existing consumers require no changes.
 - `idempotency` (`auto`): Enables automatic deduplication by hashing the payload with SHA256. If the same payload is published again within 5 minutes, the broker silently ignores the duplicate and returns `{"status": "ignored", "reason": "idempotency_key_exists"}`. Useful when the client retries on network errors without managing keys manually.
@@ -112,6 +112,7 @@ curl -X POST "[http://127.0.0.1:7800/api/queues/publish](http://127.0.0.1:7800/a
 - `auto_ack` (`true`/`false`): If `true`, the message is marked processed and removed immediately.
 - `limit` (e.g., `10`): Batching/Prefetch. Extracts up to `X` messages in a single network call.
 - `group` (e.g., `emails`, `invoices`): Enables **Consumer Groups** (Pub/Sub). Binds a virtual sub-queue so multiple independent services can read the same message stream without competing for the same payload.
+- `filter_key` & `filter_val` (e.g., `?filter_key=status&filter_val=paid`): **Smart Routing (JSON Filtering)**. If provided, the broker will transparently decode the JSON payload of queued messages and only return the ones matching this exact key-value pair, ignoring/discarding the rest. Highly recommended to use alongside Consumer Groups to avoid destructively dropping messages from a shared topic.
 
 ```bash
 # Worker 1 (Email Service)
@@ -190,6 +191,9 @@ When messages arrive on a subscribed topic, the broker pushes them instantly. No
 ### Live Streaming (Server-Sent Events)
 
 **Endpoint:** `GET /stream/{topic}`
+
+**Query Parameters (Optional):**
+- `filter_key` & `filter_val` (e.g., `?filter_key=status&filter_val=paid`): Filters the incoming real-time stream so you only receive events whose JSON payload matches the criteria. Saves bandwidth and client-side processing.
 
 Opens a persistent HTTP/1.1 chunked connection. Messages published to the topic will be streamed to the client in real-time. This is a **"Spy Mode"** (non-destructive) and does not dequeue the message from actual workers.
 

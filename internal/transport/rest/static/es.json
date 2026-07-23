@@ -87,5 +87,16 @@
     "paletteNav": "navegar",
     "paletteOpen": "ver",
     "paletteClose": "cerrar",
-    "paletteNoResults": "Sin resultados"
+    "paletteNoResults": "Sin resultados",
+    "clusterTopology": "Topología del Clúster",
+    "loading": "Cargando...",
+    "publishMessage": "Publicar Mensaje",
+    "topicPlaceholder": "Nombre del Topic (ej. events)",
+    "payloadJsonPlaceholder": "Payload JSON (ej. {\"status\": \"ok\"})",
+    "priorityNormal": "Prioridad: Normal",
+    "priorityHigh": "Prioridad: Alta",
+    "priorityLow": "Prioridad: Baja",
+    "ttlPlaceholder": "TTL (ej. 1h)",
+    "delayPlaceholder": "Delay (ej. 5m)",
+    "publishBtn": "Publicar"
 }

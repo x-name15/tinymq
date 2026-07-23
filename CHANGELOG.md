@@ -2,6 +2,27 @@
 
 All notable changes of the proyect will be documented on this file.
 ---
+## [3.1.6] - 2026-07-23 — Smart Routing, Super Dashboard & Delayed Messages
+
+### Added
+- **JSON Payload Filtering (Smart Routing):** Introduced edge filtering capabilities. Consumers can now pass `filter_key` and `filter_val` to only receive messages whose JSON payload contains a specific exact match.
+  - Supported natively in HTTP Pull (`GET /consume/{topic}?filter_key=X&filter_val=Y`).
+  - Supported natively in Live Streams (`GET /stream/{topic}?filter_key=X&filter_val=Y`).
+  - Supported natively in WebSockets (passing `filter_key` and `filter_val` inside the `subscribe` command payload).
+- **Super Dashboard UI:** The local `/dashboard` has been radically upgraded with zero external dependencies (Vanilla JS/CSS).
+  - **Cluster Topology Map:** Dynamically visualizes the Raft cluster, showing Leader status and live node health across the swarm. Hides automatically in standalone mode.
+  - **Embedded Publisher:** You can now publish messages directly from the UI, supporting Priority, TTL, and Delay inputs.
+  - **i18n Support:** Full English/Spanish translations for the new modules seamlessly integrate with the existing language system.
+
+### Fixed
+- **Native Delayed Messages (`DeliverAt`) Engine Fix:** Discovered and resolved a core flaw where messages with future delivery times were immediately pushed to active Webhooks, Spies, and Waiting Consumers. The broker now correctly intercepts delayed messages, enqueues them in memory/WAL immediately for persistence across restarts, and uses a scheduled goroutine to only push them to consumers exactly when the delay matures.
+
+### Documentation
+- Updated `docs/DOCUMENTATION.md` to detail the new JSON Filtering (Smart Routing) capabilities.
+- Added usage instructions for the native Delayed Messages features.
+- Expanded the Super Dashboard section detailing the UI additions.
+
+---
 ## [3.1.5] - 2026-07-13 — Operational Hardening: Active GC & DLQ Redrive
 
 ### Added

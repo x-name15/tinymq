@@ -1069,6 +1069,45 @@
             </div>
         </div>
 
+        <!-- Cluster Map & Publisher -->
+        <div class="dash-modules-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 32px;">
+            <!-- Cluster Map -->
+            <div class="card" id="clusterMapCard" style="display: none; margin-bottom: 0;">
+                <div style="display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 16px;">
+                    <h3 style="margin: 0; font-size: 16px;">🌐 <span data-i18n="clusterTopology">Cluster Topology</span></h3>
+                    <span class="badge" id="clusterStatusBadge" style="background: var(--accent-soft); color: var(--accent-dark);" data-i18n="loading">Loading...</span>
+                </div>
+                <div id="clusterMapContent" style="display: flex; flex-direction: column; gap: 10px;">
+                </div>
+            </div>
+            
+            <!-- Publisher -->
+            <div class="card" id="publisherCard" style="margin-bottom: 0;">
+                <div style="display: flex; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 16px;">
+                    <h3 style="margin: 0; font-size: 16px;">🚀 <span data-i18n="publishMessage">Publish Message</span></h3>
+                </div>
+                <form id="publishForm" style="display: flex; flex-direction: column; gap: 12px;" onsubmit="handlePublish(event)">
+                    <input type="text" id="pubTopic" placeholder="Topic name (e.g. events)" data-i18n-placeholder="topicPlaceholder" required class="search-input" style="width: 100%;">
+                    <textarea id="pubPayload" placeholder='Payload JSON (e.g. {"status": "ok"})' data-i18n-placeholder="payloadJsonPlaceholder" required class="search-input" style="width: 100%; resize: vertical; min-height: 80px; font-family: monospace;"></textarea>
+                    
+                    <div style="display: flex; gap: 10px;">
+                        <select id="pubPriority" class="search-input" style="flex: 1; padding: 10px;">
+                            <option value="normal" data-i18n="priorityNormal">Priority: Normal</option>
+                            <option value="high" data-i18n="priorityHigh">Priority: High</option>
+                            <option value="low" data-i18n="priorityLow">Priority: Low</option>
+                        </select>
+                        <input type="text" id="pubTTL" placeholder="TTL (e.g. 1h)" data-i18n-placeholder="ttlPlaceholder" class="search-input" style="flex: 1;">
+                        <input type="text" id="pubDelay" placeholder="Delay (e.g. 5m)" data-i18n-placeholder="delayPlaceholder" class="search-input" style="flex: 1;">
+                    </div>
+                    
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px;">
+                        <span id="pubResult" style="font-size: 13px; font-weight: 500;"></span>
+                        <button type="submit" class="btn btn-primary" id="pubBtn" data-i18n="publishBtn">Publish</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
         <!-- Tabla de colas -->
         <div class="card">
             <div class="table-controls">
@@ -1939,6 +1978,107 @@
             }
         });
 
+        /* ===================== Publisher & Cluster Map ===================== */
+        async function handlePublish(e) {
+            e.preventDefault();
+            const btn = document.getElementById('pubBtn');
+            const resEl = document.getElementById('pubResult');
+            btn.disabled = true;
+            resEl.textContent = "Publishing...";
+            resEl.style.color = "var(--muted-color)";
+
+            const topic = document.getElementById('pubTopic').value.trim();
+            const payload = document.getElementById('pubPayload').value.trim();
+            const priority = document.getElementById('pubPriority').value;
+            const ttl = document.getElementById('pubTTL').value.trim();
+            const delay = document.getElementById('pubDelay').value.trim();
+
+            let url = `/publish/${encodeURIComponent(topic)}?priority=${priority}`;
+            if (ttl) url += `&ttl=${encodeURIComponent(ttl)}`;
+            if (delay) url += `&delay=${encodeURIComponent(delay)}`;
+
+            try {
+                const reqOpts = { method: 'POST', body: payload };
+                const token = localStorage.getItem('tmq_auth_token') || sessionStorage.getItem('tmq_auth_token');
+                if (token) {
+                    reqOpts.headers = { 'Authorization': `Bearer ${token}` };
+                }
+                const res = await fetch(url, reqOpts);
+                if (res.ok) {
+                    resEl.textContent = "✔ Message published";
+                    resEl.style.color = "var(--accent-dark)";
+                    document.getElementById('pubPayload').value = ""; // Clear payload on success
+                    fetchStats(); // Force refresh UI
+                } else {
+                    const errText = await res.text();
+                    resEl.textContent = `❌ Error: ${errText}`;
+                    resEl.style.color = "var(--red)";
+                }
+            } catch (err) {
+                resEl.textContent = `❌ Request failed`;
+                resEl.style.color = "var(--red)";
+            } finally {
+                btn.disabled = false;
+                setTimeout(() => { if (resEl.textContent.startsWith("✔")) resEl.textContent = ""; }, 3000);
+            }
+        }
+
+        async function fetchClusterStatus() {
+            try {
+                const reqOpts = { method: 'GET' };
+                const token = localStorage.getItem('tmq_auth_token') || sessionStorage.getItem('tmq_auth_token');
+                if (token) reqOpts.headers = { 'Authorization': `Bearer ${token}` };
+                
+                const res = await fetch('/api/cluster/status', reqOpts);
+                if (!res.ok) return;
+                const data = await res.json();
+                
+                const card = document.getElementById('clusterMapCard');
+                const content = document.getElementById('clusterMapContent');
+                const badge = document.getElementById('clusterStatusBadge');
+                
+                if (!data.clustering_enabled) {
+                    card.style.display = "none";
+                    document.querySelector('.dash-modules-grid').style.gridTemplateColumns = "1fr";
+                    return;
+                }
+                
+                card.style.display = "block";
+                badge.textContent = `Term: ${data.term}`;
+                
+                let html = `
+                    <div style="padding: 10px; background: var(--msg-count-bg); border-radius: var(--radius); border: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between;">
+                        <div>
+                            <strong>${data.id} (This Node)</strong><br>
+                            <span style="font-size: 12px; color: var(--muted-color);">${data.address}</span>
+                        </div>
+                        <span class="badge" style="background: ${data.role === 'Leader' ? 'var(--purple)' : 'var(--blue)'}; color: white;">${data.role}</span>
+                    </div>
+                `;
+                
+                if (data.peers && data.peers.length > 0) {
+                    html += `<div style="margin-top: 10px; font-size: 12px; color: var(--muted-color); text-transform: uppercase; font-weight: 600;">Peers</div>`;
+                    data.peers.forEach(p => {
+                        const statusColor = p.status === 'Alive' ? 'var(--accent)' : 'var(--red)';
+                        html += `
+                        <div style="padding: 10px; border-radius: var(--radius); border: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between;">
+                            <div>
+                                <strong>${p.id}</strong><br>
+                                <span style="font-size: 12px; color: var(--muted-color);">${p.address}</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                ${p.id === data.leader_id ? '<span title="Leader">👑</span>' : ''}
+                                <span style="width: 8px; height: 8px; border-radius: 50%; background: ${statusColor};" title="${p.status}"></span>
+                            </div>
+                        </div>`;
+                    });
+                }
+                content.innerHTML = html;
+            } catch (e) {
+                console.error("Failed to fetch cluster status", e);
+            }
+        }
+
         /* ===================== Init ===================== */
         (async function init() {
             await loadI18n(currentLang);
@@ -1955,6 +2095,8 @@
             recomputeDerivedMetrics();
             updateSortArrows();
             manageRefresh();
+            fetchClusterStatus();
+            setInterval(fetchClusterStatus, 5000);
         })();
     </script>
 </body>

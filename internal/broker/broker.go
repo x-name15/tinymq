@@ -267,143 +267,14 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			return err
 		}
 	}
-	b.mu.RLock()
-	configs := b.webhooks[topicName]
-	b.mu.RUnlock()
-	if len(configs) > 0 {
-		// SEC-CRIT-01: Each webhook delivery runs in its own goroutine, bounded by webhookSem
-		// (max 64 concurrent deliveries). Uses a per-request context so the HTTP timeout is
-		// properly scoped and goroutines cannot accumulate unboundedly under high publish rates.
-		for _, wh := range configs {
-			select {
-			case b.webhookSem <- struct{}{}:
-			default:
-				log.Printf("[Broker] Webhook semaphore full, dropping delivery to %s\n", wh.URL)
-				continue
-			}
-			go func(endpoint WebhookConfig, data []byte) {
-				defer func() { <-b.webhookSem }()
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				req, err := http.NewRequestWithContext(ctx, "POST", endpoint.URL, bytes.NewBuffer(data))
-				if err != nil {
-					log.Printf("[Broker] Failed to build webhook request to %s: %v\n", endpoint.URL, err)
-					return
-				}
-				req.Header.Set("Content-Type", "application/json")
-				if endpoint.Secret != "" {
-					mac := hmac.New(sha256.New, []byte(endpoint.Secret))
-					mac.Write(data)
-					signature := hex.EncodeToString(mac.Sum(nil))
-					req.Header.Set("X-TinyMQ-Signature", "sha256="+signature)
-				}
-				resp, err := b.webhookClient.Do(req)
-				if err == nil {
-					resp.Body.Close()
-				} else {
-					log.Printf("[Broker] Webhook delivery failed to %s: %v\n", endpoint.URL, err)
-				}
-			}(wh, payload)
-		}
-	}
-	t.mu.Lock()
-	spyCount := len(t.spies)
-	for _, spy := range t.spies {
-		select {
-		case spy <- msg:
-		default:
-			log.Printf("[Broker] Spy buffer full for topic '%s', message %s dropped\n", t.Name, msg.ID)
-		}
-	}
-	t.mu.Unlock()
-	if spyCount > 0 {
-		log.Printf("[Broker] Delivered message %s to %d spies on topic '%s'\n", msg.ID, spyCount, t.Name)
-	}
-	for _, wildcardT := range matchingWildcards {
-		wildcardT.mu.Lock()
-		spyCountW := len(wildcardT.spies)
-		for _, spy := range wildcardT.spies {
-			select {
-			case spy <- msg:
-			default:
-				log.Printf("[Broker] Spy buffer full for topic '%s', message %s dropped\n", wildcardT.Name, msg.ID)
-			}
-		}
-		wildcardT.mu.Unlock()
-		if spyCountW > 0 {
-			log.Printf("[Broker] Delivered message %s to %d spies on wildcard topic '%s'\n", msg.ID, spyCountW, wildcardT.Name)
-		}
-	}
-	if isBroadcast {
-		var broadcastChannels []chan message.Message
-		for _, wildcardT := range matchingWildcards {
-			wildcardT.mu.Lock()
-			broadcastChannels = append(broadcastChannels, wildcardT.waitingConsumers...)
-			wildcardT.waitingConsumers = nil
-			wildcardT.mu.Unlock()
-		}
-		t.mu.Lock()
-		broadcastChannels = append(broadcastChannels, t.waitingConsumers...)
-		t.waitingConsumers = nil
-		t.mu.Unlock()
-		go func(channels []chan message.Message, m message.Message) {
-			for _, ch := range channels {
-				select {
-				case ch <- m:
-				default:
-					log.Printf("[Broker] Broadcast consumer disappeared on topic '%s', message %s dropped\n", m.Topic, m.ID)
-				}
-			}
-		}(broadcastChannels, msg)
-		return nil
-	}
+	isDelayed := deliverAt != nil && time.Now().Before(*deliverAt)
+
 	t.mu.Lock()
 	if t.Deleted {
 		t.mu.Unlock()
 		return errors.New("topic was concurrently deleted")
 	}
-	// BUG-HIGH-01: WAL persistence is deferred until we confirm the message stays in the
-	// queue (i.e. no waiting consumer takes it directly). This prevents WAL entries that
-	// are never Ack'd on direct delivery, which would cause phantom messages after restart.
-	// Check waiting consumers on matching wildcard topics first.
-	for _, wildcardT := range matchingWildcards {
-		wildcardT.mu.Lock()
-		if len(wildcardT.waitingConsumers) > 0 {
-			consumerChan := wildcardT.waitingConsumers[0]
-			wildcardT.waitingConsumers[0] = nil
-			wildcardT.waitingConsumers = wildcardT.waitingConsumers[1:]
-			wildcardT.mu.Unlock()
-			t.mu.Unlock()
-			select {
-			case consumerChan <- msg:
-				log.Printf("[Broker] Delivered message %s to waiting consumer on wildcard topic '%s'\n", msg.ID, wildcardT.Name)
-				return nil
-			default:
-				log.Printf("[Broker] Waiting consumer on wildcard topic '%s' disappeared, enqueuing message\n", wildcardT.Name)
-				t.mu.Lock()
-			}
-		} else {
-			wildcardT.mu.Unlock()
-		}
-	}
-	var pendingConsumer chan message.Message
-	if len(t.waitingConsumers) > 0 {
-		pendingConsumer = t.waitingConsumers[0]
-		t.waitingConsumers[0] = nil
-		t.waitingConsumers = t.waitingConsumers[1:]
-	}
-	if pendingConsumer != nil {
-		t.mu.Unlock()
-		select {
-		case pendingConsumer <- msg:
-			log.Printf("[Broker] Delivered message %s to waiting consumer on topic '%s'\n", msg.ID, t.Name)
-			return nil
-		default:
-			log.Printf("[Broker] Waiting consumer on topic '%s' disappeared, enqueuing message\n", t.Name)
-			t.mu.Lock()
-		}
-	}
-	// No waiting consumer took the message: persist to WAL and enqueue in memory.
+	
 	if !isBroadcast && b.storage != nil {
 		if err := b.storage.AppendPut(topicName, msg); err != nil {
 			log.Printf("Error persisting PUT record: %v\n", err)
@@ -438,13 +309,146 @@ func (b *Broker) publishCore(topicName string, payload []byte, headers map[strin
 			log.Printf("[RingBuffer] Queue '%s' full. Evicted oldest message: %s\n", topicName, oldestMsg.ID)
 		} else {
 			t.mu.Unlock()
-			// BUG-LOW-03: Use actual configured limit in error message instead of hardcoded value.
 			return fmt.Errorf("queue capacity reached (max %d messages)", b.maxMessages)
 		}
 	}
+
 	*targetQueue = append(*targetQueue, msg)
 	log.Printf("[Broker] Message %s enqueued on topic '%s' (priority: %s)\n", msg.ID, t.Name, priority)
 	t.mu.Unlock()
+
+	pushFunc := func() {
+		b.mu.RLock()
+		configs := b.webhooks[topicName]
+		b.mu.RUnlock()
+		if len(configs) > 0 {
+			for _, wh := range configs {
+				select {
+				case b.webhookSem <- struct{}{}:
+				default:
+					log.Printf("[Broker] Webhook semaphore full, dropping delivery to %s\n", wh.URL)
+					continue
+				}
+				go func(endpoint WebhookConfig, data []byte) {
+					defer func() { <-b.webhookSem }()
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					req, err := http.NewRequestWithContext(ctx, "POST", endpoint.URL, bytes.NewBuffer(data))
+					if err != nil {
+						return
+					}
+					req.Header.Set("Content-Type", "application/json")
+					if endpoint.Secret != "" {
+						mac := hmac.New(sha256.New, []byte(endpoint.Secret))
+						mac.Write(data)
+						signature := hex.EncodeToString(mac.Sum(nil))
+						req.Header.Set("X-TinyMQ-Signature", "sha256="+signature)
+					}
+					resp, err := b.webhookClient.Do(req)
+					if err == nil {
+						resp.Body.Close()
+					}
+				}(wh, payload)
+			}
+		}
+		
+		t.mu.Lock()
+		spyCount := len(t.spies)
+		for _, spy := range t.spies {
+			select {
+			case spy <- msg:
+			default:
+			}
+		}
+		t.mu.Unlock()
+		if spyCount > 0 {
+			log.Printf("[Broker] Delivered message %s to %d spies on topic '%s'\n", msg.ID, spyCount, t.Name)
+		}
+		
+		for _, wildcardT := range matchingWildcards {
+			wildcardT.mu.Lock()
+			for _, spy := range wildcardT.spies {
+				select {
+				case spy <- msg:
+				default:
+				}
+			}
+			wildcardT.mu.Unlock()
+		}
+		
+		if isBroadcast {
+			var broadcastChannels []chan message.Message
+			for _, wildcardT := range matchingWildcards {
+				wildcardT.mu.Lock()
+				broadcastChannels = append(broadcastChannels, wildcardT.waitingConsumers...)
+				wildcardT.waitingConsumers = nil
+				wildcardT.mu.Unlock()
+			}
+			t.mu.Lock()
+			broadcastChannels = append(broadcastChannels, t.waitingConsumers...)
+			t.waitingConsumers = nil
+			t.mu.Unlock()
+			go func(channels []chan message.Message, m message.Message) {
+				for _, ch := range channels {
+					select {
+					case ch <- m:
+					default:
+					}
+				}
+			}(broadcastChannels, msg)
+			return
+		}
+
+		for _, wildcardT := range matchingWildcards {
+			wildcardT.mu.Lock()
+			if len(wildcardT.waitingConsumers) > 0 {
+				consumerChan := wildcardT.waitingConsumers[0]
+				wildcardT.waitingConsumers[0] = nil
+				wildcardT.waitingConsumers = wildcardT.waitingConsumers[1:]
+				wildcardT.mu.Unlock()
+				select {
+				case consumerChan <- msg:
+					t.mu.Lock()
+					b.removeMessageByID(t, msg.ID)
+					t.mu.Unlock()
+					return
+				default:
+					t.mu.Lock()
+				}
+			} else {
+				wildcardT.mu.Unlock()
+			}
+		}
+		
+		t.mu.Lock()
+		var pendingConsumer chan message.Message
+		if len(t.waitingConsumers) > 0 {
+			pendingConsumer = t.waitingConsumers[0]
+			t.waitingConsumers[0] = nil
+			t.waitingConsumers = t.waitingConsumers[1:]
+		}
+		t.mu.Unlock()
+		
+		if pendingConsumer != nil {
+			select {
+			case pendingConsumer <- msg:
+				t.mu.Lock()
+				b.removeMessageByID(t, msg.ID)
+				t.mu.Unlock()
+				return
+			default:
+			}
+		}
+	}
+
+	if isDelayed {
+		delay := time.Until(*deliverAt)
+		log.Printf("[Broker] Message %s delayed by %v\n", msg.ID, delay)
+		time.AfterFunc(delay, pushFunc)
+	} else {
+		pushFunc()
+	}
+
 	return nil
 }
 
@@ -980,4 +984,21 @@ func (b *Broker) GetStateSnapshot() []message.Message {
 		t.mu.Unlock()
 	}
 	return allMessages
+}
+
+func (b *Broker) removeMessageByID(t *Topic, id string) {
+	removeFromSlice := func(queue *[]message.Message) bool {
+		for i, msg := range *queue {
+			if msg.ID == id {
+				*queue = append((*queue)[:i], (*queue)[i+1:]...)
+				return true
+			}
+		}
+		return false
+	}
+	if !removeFromSlice(&t.HighMessages) {
+		if !removeFromSlice(&t.Messages) {
+			removeFromSlice(&t.LowMessages)
+		}
+	}
 }

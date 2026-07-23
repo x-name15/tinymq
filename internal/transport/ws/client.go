@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/x-name15/tinymq/internal/helper"
 	"github.com/x-name15/tinymq/internal/message"
 )
 
@@ -30,9 +31,11 @@ type Client struct {
 }
 
 type WSCommand struct {
-	Action  string `json:"action"`
-	Topic   string `json:"topic,omitempty"`
-	Payload string `json:"payload,omitempty"`
+	Action    string `json:"action"`
+	Topic     string `json:"topic,omitempty"`
+	Payload   string `json:"payload,omitempty"`
+	FilterKey string `json:"filter_key,omitempty"`
+	FilterVal string `json:"filter_val,omitempty"`
 }
 
 type wsResponse struct {
@@ -170,12 +173,15 @@ func (c *Client) handleCommand(raw []byte) {
 
 		c.sendJSON(wsResponse{Status: "subscribed", Topic: cmd.Topic})
 
-		go func(topic string, ch chan message.Message) {
+		go func(topic, filterKey, filterVal string, ch chan message.Message) {
 			for {
 				select {
 				case msg, ok := <-ch:
 					if !ok {
 						return
+					}
+					if filterKey != "" && !helper.MatchJSONFilter(msg.Payload, filterKey, filterVal) {
+						continue
 					}
 					bytes, _ := json.Marshal(msg)
 					if err := c.sendMessage(string(bytes)); err != nil {
@@ -188,7 +194,7 @@ func (c *Client) handleCommand(raw []byte) {
 					return
 				}
 			}
-		}(cmd.Topic, spyChan)
+		}(cmd.Topic, cmd.FilterKey, cmd.FilterVal, spyChan)
 
 	default:
 		c.sendError("unknown action")
