@@ -255,12 +255,12 @@ func (n *Node) handlePeer(conn net.Conn) {
 					payloadB64 := base64.StdEncoding.EncodeToString(msg.Payload)
 					body := fmt.Sprintf("REPLICATE %d %s %s %s", term, n.selfAddr(), msg.Topic, payloadB64)
 					mac := n.signMessage(body)
-					conn.Write([]byte(fmt.Sprintf("%s %s\n", body, mac)))
+					conn.Write(fmt.Appendf(nil, "%s %s\n", body, mac))
 				}
 
 				syncCompleteBody := "SYNC_COMPLETE"
 				syncCompleteMac := n.signMessage(syncCompleteBody)
-				conn.Write([]byte(fmt.Sprintf("%s %s\n", syncCompleteBody, syncCompleteMac)))
+				fmt.Fprintf(conn, "%s %s\n", syncCompleteBody, syncCompleteMac)
 			}
 
 		case "REQUEST_VOTE":
